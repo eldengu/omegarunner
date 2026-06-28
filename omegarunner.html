@@ -79,6 +79,49 @@
     font-size: 11px;
     color: #10233f;
   }
+  /* MOSAIC controller panel */
+  #mosaic h2 { display: flex; align-items: center; gap: 8px; }
+  .mstat {
+    font-size: 10px; padding: 1px 7px; border-radius: 10px; letter-spacing: 0.5px;
+    text-transform: none;
+  }
+  .midle { background: #e6eef6; color: #5b7a99; }
+  .mrun  { background: #d6f5dd; color: #1f7a3a; }
+  .merr  { background: #ffe0e0; color: #c0392b; }
+  .mconn { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 6px; }
+  .mconn label { font-size: 11px; color: #2e7fb8; display: flex; flex-direction: column; gap: 2px; }
+  .mconn input {
+    font-family: monospace; font-size: 12px; padding: 4px 6px; border-radius: 5px;
+    border: 1px solid #9fc8e6; background: #f6fbff; color: #10233f;
+  }
+  #m-base { width: 230px; } #m-model { width: 120px; } #m-key { width: 240px; }
+  #m-start {
+    align-self: flex-end; padding: 6px 14px; border-radius: 6px; border: 2px solid #1769b0;
+    background: #1769b0; color: #fff; font-weight: 700; cursor: pointer; font-size: 13px;
+  }
+  #m-start.on { background: #c0392b; border-color: #c0392b; }
+  .mod {
+    display: grid; grid-template-columns: 150px 64px 1fr 64px; align-items: center;
+    gap: 10px; padding: 6px 8px; border-radius: 6px; margin-bottom: 5px;
+    background: #f3f9ff; border: 1px solid #dcebf8;
+  }
+  .mod.win { background: #fff7d6; border-color: #ffd23d; box-shadow: 0 0 0 2px #ffe79a inset; }
+  .mod .mname { font-weight: 700; font-size: 12px; color: #10233f; }
+  .mod .mpersona { font-size: 10px; color: #6b8aa6; font-weight: 400; }
+  .mod .maction {
+    font-family: monospace; font-size: 13px; font-weight: 700; text-align: center;
+    padding: 2px 0; border-radius: 4px; background: #e7f0fa; color: #1769b0;
+  }
+  .mbarwrap { background: #e2ecf5; border-radius: 5px; height: 16px; position: relative; overflow: hidden; }
+  .mbar { height: 100%; background: linear-gradient(90deg,#36b3ff,#1769b0); width: 0%; transition: width 0.25s; }
+  .mbarpct { position: absolute; right: 6px; top: 0; line-height: 16px; font-size: 10px; color: #10233f; font-variant-numeric: tabular-nums; }
+  .mmatch { font-size: 11px; text-align: center; }
+  .mmatch.ok { color: #1f7a3a; } .mmatch.no { color: #c0392b; } .mmatch.na { color: #9bb0c4; }
+  .mlog {
+    margin: 8px 0 0; max-height: 92px; overflow: auto; white-space: pre-wrap;
+    font-family: "Cascadia Code","Consolas",monospace; font-size: 11px; color: #45617a;
+    background: #f6fbff; border: 1px solid #dcebf8; border-radius: 5px; padding: 6px 8px;
+  }
 </style>
 </head>
 <body>
@@ -108,6 +151,32 @@
       <div class="panel">
         <h2>LLM State (per tick)</h2>
         <pre id="state">—</pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== MOSAIC LLM controller panel ===================== -->
+  <div class="row" style="margin-top:4px">
+    <div class="col" style="flex:0 0 100%">
+      <div class="panel" id="mosaic">
+        <h2>MOSAIC Controller — gemma-4-31b @ Cerebras
+          <span id="mosaic-status" class="mstat midle">idle</span>
+        </h2>
+        <div class="mconn">
+          <label>Base URL <input id="m-base" type="text" spellcheck="false"
+            value="https://api.cerebras.ai/v1" placeholder="https://api.cerebras.ai/v1"></label>
+          <label>Model <input id="m-model" type="text" spellcheck="false" value="gemma-4-31b"></label>
+          <label>API key <input id="m-key" type="password" spellcheck="false" placeholder="paste key (stored locally)"></label>
+          <button id="m-start" type="button">Start AI</button>
+          <span class="hint" id="m-info"></span>
+        </div>
+        <div class="hint" style="margin:2px 0 8px">
+          Three experts (same model, different system prompts) each propose an action +
+          predict the outcome <b>in parallel</b> every decision. Action = responsibility-weighted
+          vote; responsibilities shift toward whichever expert keeps predicting correctly.
+        </div>
+        <div id="m-modules"></div>
+        <pre id="m-log" class="mlog"></pre>
       </div>
     </div>
   </div>
@@ -1288,6 +1357,320 @@ window.addEventListener('keydown', (ev) => {
       if (!game.over) game.paused = !game.paused; break;
   }
 });
+
+/* =========================================================================
+   MOSAIC controller (Wolpert & Kawato 1998) over an LLM.
+
+   N modules ("experts"), each the SAME model (gemma-4-31b on Cerebras) with a
+   DIFFERENT system prompt / personality. Every decision:
+     1. All modules run their INVERSE model in PARALLEL (Promise.all): each
+        proposes an action AND a forward PREDICTION of the outcome.
+     2. The chosen action is a responsibility-weighted vote over proposals.
+     3. After the action resolves we score each module's prediction against
+        what actually happened; responsibilities move (multiplicatively, like
+        MOSAIC's responsibility predictor) toward the experts that predict
+        best, then renormalize to sum to 1.
+
+   This NEVER touches game logic. It only writes to `pendingAction` (the same
+   buffer the keyboard uses) — exactly through the existing agentStep seam.
+   ========================================================================= */
+const MCFG = {
+  settleTicks: 14,     // game ticks to wait before scoring a prediction
+  beta: 1.1,           // responsibility sharpening (higher = faster shifts)
+  respFloor: 0.02,     // minimum responsibility before renormalizing
+  temperature: 0.4,
+  maxTokens: 160,
+  minDecisionMs: 50,   // small breather between decisions
+  autoRestartMs: 2500, // when AI is on, auto-restart after the timer ends
+};
+
+// The three expert personalities. Same model, different system prompts.
+const PERSONA_CORE =
+  "You control a penguin in a 3-lane endless runner. Each decision you pick ONE action:\n" +
+  "  left  = move one lane left\n  right = move one lane right\n" +
+  "  jump  = hop (clears ground 'ice holes'/hurdles in your lane)\n  stay  = keep running in your lane\n" +
+  "Hazards: a ground hole/hurdle can be JUMPED or dodged by switching lane; a tall " +
+  "barrier/ice-block can ONLY be dodged by switching lane (jumping does NOT help). " +
+  "Gold flags = coins (collect by being in their lane as they reach you; jumping still collects). " +
+  "Hitting a hazard freezes you ~1s (costs time); it is not game over. Goal: maximise coins + distance in 60s.\n" +
+  "The state text lists, per lane, the nearest thing ahead and how many tiles away, then your lane and posture.\n" +
+  "Reply with ONLY a compact JSON object, no prose, no code fence:\n" +
+  '{"action":"left|right|jump|stay","predictCoin":0,"predictFreeze":false,"predict":"<=8 words"}\n' +
+  "predictCoin = 1 if you expect to collect a flag soon (else 0). " +
+  "predictFreeze = true if you expect to hit a hazard and freeze (else false).";
+
+const MODULE_DEFS = [
+  { id: 'greedy', name: 'Goldbeak', persona: 'coin-greedy',
+    bias: "PERSONALITY: COIN-GREEDY. You love gold flags above all. Chase coins aggressively, " +
+          "switch into the flag's lane whenever you can, and accept some risk to grab them." },
+  { id: 'safe', name: 'Iceguard', persona: 'safety-first',
+    bias: "PERSONALITY: SAFETY-FIRST. You hate freezing. Always pick the lane/action that avoids " +
+          "any hazard. Prefer a clear lane; only jump when a hole is in your lane and no clear lane is easy. Coins are secondary to never getting hit." },
+  { id: 'jumpy', name: 'Hopster', persona: 'jump-happy',
+    bias: "PERSONALITY: JUMP-HAPPY. You love hopping. Whenever a ground hole/hurdle is ahead in your " +
+          "lane, JUMP it rather than dodging. Jump to clear hazards and to snag flags mid-hop. (Remember jumping does NOT clear tall barriers.)" },
+];
+
+const mosaic = {
+  enabled: false,
+  modules: MODULE_DEFS.map(d => ({
+    ...d, resp: 1 / MODULE_DEFS.length,
+    action: 'stay', pred: null, matched: null, err: null, latency: 0, ok: true,
+  })),
+  decisions: 0,
+  lastWinner: -1,
+  lastError: '',
+  overAt: 0,
+};
+
+// --- LLM call (OpenAI-compatible chat completions). Swappable for tests. ---
+async function mosaicChat(base, key, model, system, user) {
+  if (typeof window !== 'undefined' && window.__mosaicChat) {
+    return window.__mosaicChat({ base, key, model, system, user });
+  }
+  const url = base.replace(/\/+$/, '') + '/chat/completions';
+  const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
+  const post = (body) => fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+    body: JSON.stringify(body),
+  });
+  const base_body = { model, messages, temperature: MCFG.temperature, max_tokens: MCFG.maxTokens };
+  // Prefer JSON mode; if the endpoint rejects it, retry without (parser is tolerant).
+  let res = await post({ ...base_body, response_format: { type: 'json_object' } });
+  if (!res.ok && (res.status === 400 || res.status === 422)) res = await post(base_body);
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 160));
+  const data = await res.json();
+  return data.choices && data.choices[0] && data.choices[0].message
+    ? (data.choices[0].message.content || '') : '';
+}
+
+const ACTIONS = ['left', 'right', 'jump', 'stay'];
+function parseModuleReply(text) {
+  let t = String(text || '').trim();
+  // tolerate code fences / stray prose around the JSON
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) t = fence[1].trim();
+  const brace = t.match(/\{[\s\S]*\}/);
+  if (brace) t = brace[0];
+  let o;
+  try { o = JSON.parse(t); } catch (e) { return null; }
+  const action = ACTIONS.includes(o.action) ? o.action : 'stay';
+  return {
+    action,
+    coin: o.predictCoin ? 1 : 0,
+    freeze: !!o.predictFreeze,
+    note: String(o.predict || '').slice(0, 40),
+  };
+}
+
+async function callModule(m, conn, stateText) {
+  const system = PERSONA_CORE + '\n' + m.bias;
+  const user = 'Current state:\n' + stateText + '\n\nYour action + prediction as JSON:';
+  const t0 = nowMs();
+  try {
+    const reply = await mosaicChat(conn.base, conn.key, conn.model, system, user);
+    const p = parseModuleReply(reply);
+    m.latency = Math.round(nowMs() - t0);
+    if (!p) { m.ok = false; m.action = 'stay'; m.pred = { action: 'stay', coin: 0, freeze: false, note: '(parse fail)' }; return; }
+    m.ok = true; m.action = p.action; m.pred = p;
+  } catch (err) {
+    m.latency = Math.round(nowMs() - t0);
+    m.ok = false; m.action = 'stay';
+    m.pred = { action: 'stay', coin: 0, freeze: false, note: '(error)' };
+    mosaic.lastError = String(err.message || err).slice(0, 160);
+  }
+}
+function nowMs() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
+
+// --- Pure: responsibility-weighted vote over proposed actions. -------------
+function chooseAction(modules) {
+  const tally = { left: 0, right: 0, jump: 0, stay: 0 };
+  for (const m of modules) tally[m.action] = (tally[m.action] || 0) + m.resp;
+  let best = 'stay', bestW = -1;
+  for (const a of ACTIONS) if (tally[a] > bestW) { bestW = tally[a]; best = a; }
+  // winner module = the highest-responsibility module that proposed the winning action
+  let winnerIdx = -1, wr = -1;
+  modules.forEach((m, i) => { if (m.action === best && m.resp > wr) { wr = m.resp; winnerIdx = i; } });
+  return { action: best, winnerIdx, tally };
+}
+
+// --- Pure: score predictions vs. reality, update + renormalize responsibilities.
+function scorePredictions(modules, actual, cfg = MCFG) {
+  for (const m of modules) {
+    const p = m.pred || { coin: 0, freeze: false };
+    let err = 0;
+    if ((p.coin > 0) !== (actual.coinGain > 0)) err++;
+    if (!!p.freeze !== !!actual.freeze) err++;
+    if (m.ok === false) err = Math.max(err, 1); // a failed call can't have predicted well
+    m.err = err;
+    m.matched = err === 0;
+    m.resp *= Math.exp(-cfg.beta * err); // MOSAIC-style multiplicative update
+  }
+  // floor + renormalize to sum to 1
+  let sum = 0;
+  for (const m of modules) { if (m.resp < cfg.respFloor) m.resp = cfg.respFloor; sum += m.resp; }
+  if (sum > 0) for (const m of modules) m.resp /= sum;
+  return modules;
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// --- The async control loop. Decoupled from the 60fps game loop: the game
+//     keeps running with the last action between (fast) LLM decisions. ------
+async function mosaicLoop() {
+  const conn = readConn();
+  setStatus('mrun', 'running');
+  while (mosaic.enabled) {
+    if (game.paused) { await sleep(120); continue; }
+    if (game.over) {
+      // Let the run finish, then auto-restart so the demo keeps evolving.
+      if (!mosaic.overAt) mosaic.overAt = nowMs();
+      if (nowMs() - mosaic.overAt > MCFG.autoRestartMs) { game = newGame(); mosaic.overAt = 0; }
+      await sleep(150); continue;
+    }
+    mosaic.overAt = 0;
+
+    const before = { coins: game.coins, lane: game.lane, tick: game.tick, frozen: game.freezeT > 0 };
+    const stateText = game.lastState || encodeState(game);
+
+    // 1) PARALLEL inverse+prediction for all modules (the Cerebras-speed point).
+    await Promise.all(mosaic.modules.map(m => callModule(m, conn, stateText)));
+
+    // 2) Responsibility-weighted vote -> action applied via the agentStep seam.
+    const { action, winnerIdx } = chooseAction(mosaic.modules);
+    pendingAction = action;
+    mosaic.lastWinner = winnerIdx;
+    mosaic.decisions++;
+    renderModules(winnerIdx, action);
+    logDecision(action, winnerIdx);
+
+    // 3) Wait for the action to resolve, sampling whether a freeze occurred.
+    let sawFreeze = false;
+    const target = game.tick + MCFG.settleTicks;
+    while (game.tick < target && mosaic.enabled && !game.over && !game.paused) {
+      if (!before.frozen && game.freezeT > 0) sawFreeze = true;
+      await sleep(CONFIG.tickMs);
+    }
+    if (!before.frozen && game.freezeT > 0) sawFreeze = true;
+
+    const actual = {
+      coinGain: game.coins - before.coins,
+      freeze: sawFreeze,
+      laneChanged: game.lane !== before.lane,
+    };
+    scorePredictions(mosaic.modules, actual);
+    renderModules(mosaic.lastWinner, action, actual);
+
+    if (mosaic.lastError) { setStatus('merr', 'error'); }
+    else { setStatus('mrun', 'running'); }
+    await sleep(MCFG.minDecisionMs);
+  }
+  setStatus('midle', 'stopped');
+}
+
+// ---- MOSAIC panel UI ------------------------------------------------------
+function readConn() {
+  return {
+    base: (document.getElementById('m-base').value || 'https://api.cerebras.ai/v1').trim(),
+    key: (document.getElementById('m-key').value || '').trim(),
+    model: (document.getElementById('m-model').value || 'gemma-4-31b').trim(),
+  };
+}
+function setStatus(cls, text) {
+  const el = document.getElementById('mosaic-status');
+  if (!el) return;
+  el.className = 'mstat ' + cls;
+  el.textContent = text;
+  const info = document.getElementById('m-info');
+  if (info) info.textContent = mosaic.lastError ? ('last error: ' + mosaic.lastError) : '';
+}
+const ACTION_GLYPH = { left: '◀ left', right: 'right ▶', jump: '▲ jump', stay: '· stay' };
+function buildModulesUI() {
+  const host = document.getElementById('m-modules');
+  if (!host) return;
+  host.innerHTML = '';
+  mosaic.modules.forEach((m, i) => {
+    const row = document.createElement('div');
+    row.className = 'mod'; row.id = 'mod-' + i;
+    row.innerHTML =
+      '<div><div class="mname">' + m.name + '</div>' +
+      '<div class="mpersona">' + m.persona + '</div></div>' +
+      '<div class="maction" id="mact-' + i + '">· stay</div>' +
+      '<div class="mbarwrap"><div class="mbar" id="mbar-' + i + '"></div>' +
+      '<span class="mbarpct" id="mpct-' + i + '"></span></div>' +
+      '<div class="mmatch na" id="mmatch-' + i + '">—</div>';
+    host.appendChild(row);
+  });
+  renderModules(-1, null);
+}
+function renderModules(winnerIdx, action, actual) {
+  mosaic.modules.forEach((m, i) => {
+    const row = document.getElementById('mod-' + i);
+    const act = document.getElementById('mact-' + i);
+    const bar = document.getElementById('mbar-' + i);
+    const pct = document.getElementById('mpct-' + i);
+    const mt = document.getElementById('mmatch-' + i);
+    if (!row) return;
+    row.classList.toggle('win', i === winnerIdx && winnerIdx >= 0);
+    if (act) act.textContent = ACTION_GLYPH[m.action] || m.action;
+    if (bar) bar.style.width = (m.resp * 100).toFixed(1) + '%';
+    if (pct) pct.textContent = (m.resp * 100).toFixed(0) + '%';
+    if (mt) {
+      if (m.matched === null) { mt.className = 'mmatch na'; mt.textContent = '—'; }
+      else if (m.matched) { mt.className = 'mmatch ok'; mt.textContent = '✓ hit'; }
+      else { mt.className = 'mmatch no'; mt.textContent = '✗ miss'; }
+    }
+  });
+}
+function logDecision(action, winnerIdx) {
+  const w = mosaic.modules[winnerIdx];
+  const parts = mosaic.modules.map(m =>
+    `${m.name}:${m.action}${m.pred && m.pred.coin ? '$' : ''}${m.pred && m.pred.freeze ? '!' : ''}` +
+    `(${(m.resp * 100).toFixed(0)}%${m.latency ? ' ' + m.latency + 'ms' : ''})`);
+  logLine(`#${mosaic.decisions} -> ${action.toUpperCase()} [win:${w ? w.name : '?'}]  ` + parts.join('  '));
+}
+function logLine(s) {
+  const el = document.getElementById('m-log');
+  if (!el) return;
+  el.textContent = (s + '\n' + el.textContent).split('\n').slice(0, 40).join('\n');
+}
+
+function startMosaic() {
+  const conn = readConn();
+  if (!conn.key) { mosaic.lastError = 'no API key provided'; setStatus('merr', 'error'); return; }
+  if (mosaic.enabled) return;
+  try { localStorage.setItem('mosaicConn', JSON.stringify({ base: conn.base, model: conn.model })); } catch (e) {}
+  mosaic.lastError = '';
+  mosaic.enabled = true;
+  document.getElementById('m-start').textContent = 'Stop AI';
+  document.getElementById('m-start').classList.add('on');
+  mosaicLoop();
+}
+function stopMosaic() {
+  mosaic.enabled = false;
+  pendingAction = 'stay';
+  document.getElementById('m-start').textContent = 'Start AI';
+  document.getElementById('m-start').classList.remove('on');
+  setStatus('midle', 'stopped');
+}
+if (typeof document !== 'undefined') {
+  window.addEventListener('DOMContentLoaded', () => {
+    buildModulesUI();
+    try {
+      const saved = JSON.parse(localStorage.getItem('mosaicConn') || '{}');
+      if (saved.base) document.getElementById('m-base').value = saved.base;
+      if (saved.model) document.getElementById('m-model').value = saved.model;
+    } catch (e) {}
+    document.getElementById('m-start').addEventListener('click', () =>
+      mosaic.enabled ? stopMosaic() : startMosaic());
+  });
+}
+
+// Test hooks (used by the headless harness; no effect in the browser).
+if (typeof window !== 'undefined') {
+  window.MOSAIC = { mosaic, chooseAction, scorePredictions, parseModuleReply, callModule, MCFG };
+}
 
 // ---- Main loop -----------------------------------------------------------
 let acc = 0, last = performance.now();
