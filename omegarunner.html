@@ -157,6 +157,11 @@
   .cmod .cmact { font-family: monospace; font-weight: 700; color: #1769b0; text-align: center; }
   .cmmatch { text-align: center; font-weight: 700; }
   .cmmatch.ok { color: #1f7a3a; } .cmmatch.no { color: #c0392b; } .cmmatch.na { color: #9bb0c4; }
+  .cmp-note {
+    margin-top: 6px; font-size: 11px; min-height: 14px; color: #4a7aa0;
+    font-family: "Cascadia Code","Consolas",monospace;
+  }
+  .cmp-note.err { color: #c0392b; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -226,7 +231,7 @@
         <div class="mconn">
           <button id="cmp-start" type="button">Start Comparison</button>
           <label>LEFT time budget (ms)
-            <input id="cmp-budget" type="number" min="50" step="50" value="350"></label>
+            <input id="cmp-budget" type="number" min="50" step="50" value="450"></label>
           <span class="hint">Uses the Base URL / model / API key from the panel above.
             Both sides run the identical 60s seeded game; only the evaluation strategy differs.</span>
         </div>
@@ -244,6 +249,7 @@
               <div class="cmp-score"><span>score</span><b id="cmp-score-L">0</b></div>
             </div>
             <div class="cmp-mods" id="cmp-mods-L"></div>
+            <div class="cmp-note" id="cmp-note-L"></div>
           </div>
           <div class="cmp-side">
             <div class="cmp-head">RIGHT — PARALLEL <span class="cmp-tag par">Promise.all</span></div>
@@ -258,6 +264,7 @@
               <div class="cmp-score"><span>score</span><b id="cmp-score-R">0</b></div>
             </div>
             <div class="cmp-mods" id="cmp-mods-R"></div>
+            <div class="cmp-note" id="cmp-note-R"></div>
           </div>
         </div>
         <div class="hint" style="margin-top:6px">
@@ -1535,7 +1542,8 @@ const mosaic = {
 async function mosaicChat(base, key, model, system, user) {
   if (typeof window !== 'undefined' && window.__mosaicChat) {
     const r = await window.__mosaicChat({ base, key, model, system, user });
-    return (typeof r === 'string') ? { content: r } : r;
+    if (typeof r === 'string') return { content: r };
+    return { content: r.content || '', usage: r.usage, timeInfo: r.timeInfo || r.time_info };
   }
   const url = base.replace(/\/+$/, '') + '/chat/completions';
   const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
@@ -1817,7 +1825,7 @@ if (typeof document !== 'undefined') {
    freeze less, and end with more coins + distance.
    ========================================================================= */
 const CMP = {
-  budgetMs: 350,      // LEFT per-decision wall-clock budget (tunable)
+  budgetMs: 450,      // LEFT per-decision wall-clock budget (tunable)
   settleTicks: MCFG.settleTicks,
   beta: MCFG.beta,
   respFloor: MCFG.respFloor,
@@ -1875,31 +1883,34 @@ function scoreSubset(allModules, evaluated, actual, cfg) {
   if (sum > 0) for (const m of allModules) m.resp /= sum;
 }
 
-// LEFT: sequential evaluation under a wall-clock budget.
-async function evalSequential(modules, conn, stateText, budgetMs) {
+// LEFT: sequential evaluation under a per-decision wall-clock budget.
+// Calls modules one at a time; after each returns, stop starting NEW calls
+// once the budget is spent. The first module is always evaluated, so under a
+// tight budget the LEFT side acts on a PARTIAL committee (1-2 of 3) — never
+// zero — while the parallel side gets all 3. A returned call counts as
+// "evaluated" whether it succeeded or errored (the LLM was actually called).
+async function evalSequential(modules, conn, stateText, budgetMs, onErr) {
   const deadline = nowMs() + budgetMs;
   const evaluated = [];
   for (const m of modules) {
-    const remaining = deadline - nowMs();
-    if (remaining <= 0) break;                 // out of budget -> act on what we have
-    const timeout = new Promise(res => setTimeout(() => res('__timeout__'), remaining));
-    const done = callModule(m, conn, stateText, () => {}).then(() => '__done__');
-    const who = await Promise.race([done, timeout]);
-    if (who === '__timeout__') break;          // call still running when budget hit
-    evaluated.push(m);
+    if (evaluated.length > 0 && nowMs() >= deadline) break; // budget spent (always do >=1)
+    await callModule(m, conn, stateText, onErr ? (e) => onErr(m, e) : undefined);
+    evaluated.push(m);                                      // call returned (ok or error)
   }
   return evaluated;
 }
 
-// RIGHT: parallel evaluation — all modules within one round-trip.
-async function evalParallel(modules, conn, stateText) {
-  await Promise.all(modules.map(m => callModule(m, conn, stateText, () => {})));
-  return modules.filter(m => m.ok !== false);
+// RIGHT: parallel evaluation — all modules within one round-trip (Promise.all).
+async function evalParallel(modules, conn, stateText, onErr) {
+  await Promise.all(modules.map(m =>
+    callModule(m, conn, stateText, onErr ? (e) => onErr(m, e) : undefined)));
+  return modules.slice(); // all 3 were called and returned
 }
 
 async function controllerLoop(ctrl, getGame) {
   const conn = readConn();
   ctrl.running = true;
+  const onErr = (m, err) => { ctrl.lastError = m.name + ': ' + String(err.message || err).slice(0, 120); };
   while (cmp.active) {
     const g = getGame();
     if (!g || g.over) break;
@@ -1907,29 +1918,38 @@ async function controllerLoop(ctrl, getGame) {
 
     const before = { coins: g.coins, tick: g.tick, frozen: g.freezeT > 0 };
     const stateText = g.lastState || encodeState(g);
+    ctrl.lastError = ''; // clear; repopulated by onErr if a call fails this decision
 
-    // Evaluate modules per this controller's strategy.
+    // Evaluate modules per this controller's strategy (these are the REAL
+    // gemma-4-31b calls — sequential-under-budget vs Promise.all).
     const evaluated = ctrl.mode === 'seq'
-      ? await evalSequential(ctrl.modules, conn, stateText, CMP.budgetMs)
-      : await evalParallel(ctrl.modules, conn, stateText);
+      ? await evalSequential(ctrl.modules, conn, stateText, CMP.budgetMs, onErr)
+      : await evalParallel(ctrl.modules, conn, stateText, onErr);
 
     ctrl.evaluatedThisTick = evaluated.length;
     ctrl.evaluatedIds = new Set(evaluated.map(m => m.id));
     ctrl.decisions++;
 
-    // Aggregate tokens/sec across the modules evaluated this decision.
-    let toks = 0, time = 0;
-    for (const m of evaluated) { toks += m.compTokens || 0; time += m.compTime || 0; }
-    ctrl.aggTokps = time > 0 ? toks / time : (evaluated.reduce((s, m) => s + (m.tokps || 0), 0) / Math.max(1, evaluated.length));
+    // Only modules with a valid (parsed) response vote.
+    const voters = evaluated.filter(m => m.ok);
+    ctrl.votersThisTick = voters.length;
 
-    // Decision = responsibility-weighted vote over the evaluated subset only.
-    const voters = evaluated.length ? evaluated : [];
+    // Aggregate tokens/sec across the modules that actually produced output.
+    let toks = 0, time = 0;
+    for (const m of voters) { toks += m.compTokens || 0; time += m.compTime || 0; }
+    ctrl.aggTokps = time > 0 ? toks / time
+      : (voters.length ? voters.reduce((s, m) => s + (m.tokps || 0), 0) / voters.length : 0);
+
+    // Decision = responsibility-weighted vote over the valid voters.
     const { action, winnerIdx } = voters.length
       ? chooseActionAmong(ctrl.modules, voters)
       : { action: 'stay', winnerIdx: -1 };
     ctrl.pendingAction = action;
     ctrl.lastAction = action;
     ctrl.winnerIdx = winnerIdx;
+    ctrl.note = ctrl.lastError
+      ? ('⚠ ' + ctrl.lastError)
+      : (voters.length + '/' + ctrl.modules.length + ' voted → ' + action.toUpperCase());
 
     renderCmpSide(ctrl);
 
@@ -2046,6 +2066,7 @@ function renderCmpSide(ctrl) {
   });
 }
 function updateCmpStats() {
+  let anyErr = '';
   for (const [side, ctrl, g] of [['L', cmp.ctrlL, cmp.gameL], ['R', cmp.ctrlR, cmp.gameR]]) {
     if (!ctrl || !g) continue;
     const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
@@ -2057,6 +2078,17 @@ function updateCmpStats() {
     const secs = Math.ceil(g.timeLeftTicks / CONFIG.ticksPerSecond);
     set('cmp-time-' + side, g.over ? 'DONE' : (secs + 's'));
     set('cmp-score-' + side, g.over ? g.finalScore : (g.coins * CONFIG.coinValue + Math.round(g.distance)));
+    const note = document.getElementById('cmp-note-' + side);
+    if (note) {
+      note.textContent = ctrl.note || (ctrl.decisions ? '' : 'waiting for first decision…');
+      note.className = 'cmp-note' + (ctrl.lastError ? ' err' : '');
+    }
+    if (ctrl.lastError) anyErr = ctrl.lastError;
+  }
+  if (cmp.active) {
+    if (anyErr) setCmpStatus('merr', 'LLM error: ' + anyErr);
+    else if (cmp.gameL.over && cmp.gameR.over) setCmpStatus('midle', 'finished — seed ' + cmp.seed.toString(16));
+    else setCmpStatus('mrun', 'racing — seed ' + cmp.seed.toString(16));
   }
 }
 function drawMiniGame(c, g, frozenLabel) {
@@ -2143,8 +2175,7 @@ function loop(now) {
   if (cmp.active) {
     if (cmp.ctxL) drawMiniGame(cmp.ctxL, cmp.gameL);
     if (cmp.ctxR) drawMiniGame(cmp.ctxR, cmp.gameR);
-    updateCmpStats();
-    if (cmp.gameL.over && cmp.gameR.over) setCmpStatus('midle', 'finished — seed ' + cmp.seed.toString(16));
+    updateCmpStats(); // also drives the racing/finished/error status badge
   }
   requestAnimationFrame(loop);
 }
