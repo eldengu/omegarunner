@@ -8,8 +8,9 @@
   html, body {
     margin: 0;
     padding: 0;
-    background: #0e1116;
-    color: #e6edf3;
+    background: #bfe6ff;
+    background: linear-gradient(#a9e0ff 0%, #d8f1ff 60%, #eef9ff 100%);
+    color: #1a3a5c;
     font-family: "Segoe UI", system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
@@ -22,17 +23,19 @@
   }
   h1 {
     margin: 4px 0 0;
-    font-size: 20px;
-    letter-spacing: 2px;
-    font-weight: 600;
-    color: #58a6ff;
+    font-size: 22px;
+    letter-spacing: 4px;
+    font-weight: 800;
+    color: #1769b0;
+    text-shadow: 2px 2px 0 #ffffff;
   }
   #game {
-    background: linear-gradient(#1a2030, #0c0f16);
-    border: 1px solid #283042;
-    border-radius: 10px;
-    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    background: #a9e0ff;
+    border: 4px solid #10233f;
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(30,80,130,0.35);
     display: block;
+    image-rendering: pixelated;
   }
   .row {
     display: flex;
@@ -43,39 +46,39 @@
   }
   .col { flex: 1; }
   .panel {
-    background: #11161f;
-    border: 1px solid #283042;
-    border-radius: 8px;
+    background: #ffffff;
+    border: 2px solid #7fc0ea;
+    border-radius: 6px;
     padding: 10px 12px;
     font-size: 12px;
     line-height: 1.5;
+    color: #1a3a5c;
   }
   .panel h2 {
     margin: 0 0 6px;
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 1px;
-    color: #8b949e;
+    color: #2e7fb8;
   }
   #state {
     white-space: pre-wrap;
     font-family: "Cascadia Code", "Consolas", monospace;
     font-size: 12px;
-    color: #ade6c0;
+    color: #1769b0;
     margin: 0;
   }
-  .hint { color: #8b949e; font-size: 12px; }
+  .hint { color: #4a7aa0; font-size: 12px; }
   kbd {
-    background: #21262d;
-    border: 1px solid #30363d;
+    background: #eaf6ff;
+    border: 1px solid #7fc0ea;
     border-bottom-width: 2px;
     border-radius: 4px;
     padding: 1px 6px;
     font-family: monospace;
     font-size: 11px;
+    color: #10233f;
   }
-  #hud { font-variant-numeric: tabular-nums; }
-  #hud b { color: #ffd166; }
 </style>
 </head>
 <body>
@@ -85,13 +88,16 @@
   <div class="row">
     <div class="col">
       <div class="panel" id="hud">
-        Score: <b id="score">0</b> &nbsp;|&nbsp; Coins: <b id="coins">0</b>
-        &nbsp;|&nbsp; Distance: <b id="dist">0</b>m &nbsp;|&nbsp; Speed: <b id="speed">1.0</b>x
-        <div class="hint" style="margin-top:6px">
-          <kbd>&larr;</kbd> <kbd>&rarr;</kbd> move lanes &nbsp;
-          <kbd>&uarr;</kbd> / <kbd>Space</kbd> jump &nbsp;
+        <h2>Controls</h2>
+        <div class="hint">
+          <kbd>&larr;</kbd> <kbd>&rarr;</kbd> waddle between lanes &nbsp;
+          <kbd>&uarr;</kbd> / <kbd>Space</kbd> hop &nbsp;
           <kbd>R</kbd> restart &nbsp;
           <kbd>P</kbd> pause
+          <div style="margin-top:6px">
+            Hop the <b style="color:#1f7a3a">ice holes</b>; switch lanes to dodge the
+            <b style="color:#2e7fb8">ice blocks</b>; grab the <b style="color:#e0a700">gold flags</b>.
+          </div>
         </div>
       </div>
     </div>
@@ -469,7 +475,7 @@ function updateFx(g, dtf) {
         x: px + (Math.random() - 0.5) * 26, y: py - 2,
         vx: -1.4 - Math.random() * 1.6, vy: -0.6 - Math.random(),
         life: 22, size: 4 + Math.random() * 4,
-        color: 'rgba(180,200,230,0.5)', grav: 0.02, layer: 'back', shape: 'circle',
+        color: 'rgba(230,245,255,0.7)', grav: 0.02, layer: 'back', shape: 'circle',
       });
     }
   }
@@ -492,12 +498,11 @@ function detectEvents(g) {
     let placed = 0;
     for (const [id, sp] of fx.screenPos) {
       if (sp.kind === KINDS.COIN && !live.has(id)) {
-        burst(sp.x, sp.y, 16, ['#fff3b0', '#ffd166', '#ffb703', '#fff'],
-          { spd: 4, life: 30, size: 5, up: 1.5, grav: 0.18, shape: 'spark' });
-        // ring sparkle
-        burst(sp.x, sp.y, 8, ['#fffbe6'], { spd: 6, life: 16, size: 3, grav: 0 });
-        fx.pops.push({ x: sp.x, y: sp.y - 10, t: 0, max: 34, text: '+' + CONFIG.coinValue, color: '#ffe08a' });
-        fx.flash = Math.min(0.5, fx.flash + 0.18);
+        burst(sp.x, sp.y - 30, 14, ['#fff3b0', '#ffd23d', '#ffe680', '#fff'],
+          { spd: 3.6, life: 28, size: 4, up: 1.5, grav: 0.16, shape: 'spark' });
+        burst(sp.x, sp.y - 30, 7, ['#ffffff'], { spd: 5, life: 14, size: 3, grav: 0 });
+        fx.pops.push({ x: sp.x, y: sp.y - 44, t: 0, max: 34, text: '+' + CONFIG.coinValue, color: '#ffe14d' });
+        fx.flash = Math.min(0.4, fx.flash + 0.14);
         placed++;
       }
     }
@@ -510,11 +515,11 @@ function detectEvents(g) {
 
   // Landing: jump timer reached 0 this frame -> squash + dust + shake.
   if (fx.prevJumpT > 0 && g.jumpT === 0 && !g.over) {
-    fx.land = 1; fx.shake = Math.max(fx.shake, 7);
+    fx.land = 1; fx.shake = Math.max(fx.shake, 5);
     const px = laneCenterX(playerLaneFloat(g), CONFIG.zPlayer);
     const py = depthY(CONFIG.zPlayer);
-    burst(px, py, 16, ['rgba(200,215,240,0.85)', 'rgba(160,185,220,0.7)'],
-      { spd: 4.2, life: 20, size: 6, grav: 0.08, up: 0.5, layer: 'back' });
+    burst(px, py, 14, ['rgba(255,255,255,0.95)', 'rgba(214,238,255,0.85)'],
+      { spd: 3.8, life: 20, size: 6, grav: 0.06, up: 0.5, layer: 'back' });
   }
   fx.prevJumpT = g.jumpT;
 
@@ -523,11 +528,11 @@ function detectEvents(g) {
     const px = laneCenterX(playerLaneFloat(g), CONFIG.zPlayer);
     const py = depthY(CONFIG.zPlayer) - 50;
     const cols = g.deathBy === KINDS.BARRIER
-      ? ['#5d8df8', '#9ec1ff', '#ffffff', '#ff7b72']
-      : ['#ff6b8b', '#ffd166', '#ffffff', '#ff7b72'];
-    burst(px, py, 46, cols, { spd: 7, life: 46, size: 7, up: 3, grav: 0.22, shape: 'spark' });
-    burst(px, py, 24, ['#ffffff'], { spd: 9, life: 18, size: 4, grav: 0 });
-    fx.shake = 18; fx.flash = 0.85;
+      ? ['#a6dbff', '#eaf8ff', '#ffffff', '#6db4e6']   // shattered ice
+      : ['#bfe6ff', '#1f4e7a', '#ffffff', '#9fd0f0'];  // splash from the hole
+    burst(px, py, 40, cols, { spd: 6.5, life: 44, size: 7, up: 3, grav: 0.22 });
+    burst(px, py, 20, ['#ffffff'], { spd: 8, life: 18, size: 4, grav: 0 });
+    fx.shake = 16; fx.flash = 0.7;
   }
   fx.prevOver = g.over;
 }
@@ -570,162 +575,142 @@ function draw(g) {
 
   // Overlays.
   if (g.over) drawGameOver(g);
-  else if (g.paused) drawCenterText('PAUSED', '#ffd166');
+  else if (g.paused) drawCenterText('PAUSED', '#9fe0ff');
+
+  // Retro HUD bar always on top.
+  drawHUD(g);
 }
 
-// ---- Background: parallax arcade sunset + rushing neon scenery -----------
+// ---- Background: bright Antarctic snowfield (flat retro colors) ----------
+const SNOW_GROUND = '#f4fbff', SNOW_TRACK = '#ffffff', ICE_BLUE = '#bfe6ff';
+const SKY = '#a9e0ff', HORIZON = '#7fc0ea';
+
 function drawBackground(g) {
   const W = CONFIG.canvasW, H = CONFIG.canvasH, hor = depthY(1);
-  // Sky gradient.
-  const sky = ctx.createLinearGradient(0, 0, 0, hor + 40);
-  sky.addColorStop(0, '#2a1a52');
-  sky.addColorStop(0.45, '#5a2a82');
-  sky.addColorStop(0.75, '#c2407e');
-  sky.addColorStop(1, '#ff8c5a');
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, W, hor + 40);
 
-  // Sun glow.
-  const camX = (playerLaneFloat(g) - (CONFIG.lanes - 1) / 2) * 18;
-  const sunX = W / 2 - camX * 0.3, sunY = hor - 18;
-  const sg = ctx.createRadialGradient(sunX, sunY, 4, sunX, sunY, 130);
-  sg.addColorStop(0, 'rgba(255,240,180,0.95)');
-  sg.addColorStop(0.4, 'rgba(255,170,90,0.55)');
-  sg.addColorStop(1, 'rgba(255,120,90,0)');
-  ctx.fillStyle = sg;
-  ctx.fillRect(0, 0, W, hor + 60);
-  ctx.fillStyle = '#ffe9b0';
-  ctx.beginPath(); ctx.arc(sunX, sunY, 34, 0, Math.PI * 2); ctx.fill();
-  // Sun bands.
-  ctx.fillStyle = '#ff8c5a';
-  for (let i = 0; i < 4; i++) {
-    ctx.fillRect(sunX - 36, sunY + 8 + i * 8, 72, 3.5);
-  }
+  // Flat light-blue sky.
+  ctx.fillStyle = SKY;
+  ctx.fillRect(0, 0, W, hor + 2);
 
-  // Distant skyline silhouette (slow parallax by camera x).
-  ctx.fillStyle = 'rgba(40,20,60,0.85)';
-  const baseY = hor + 6;
-  for (let i = -2; i < 16; i++) {
-    const seed = (i * 928371) % 97;
-    const bw = 26 + (seed % 5) * 9;
-    const bh = 24 + (seed % 7) * 12;
-    const bx = ((i * 64 - camX * 0.5) % (W + 128) + W + 128) % (W + 128) - 64;
-    ctx.fillRect(bx, baseY - bh, bw, bh);
-    ctx.fillStyle = 'rgba(255,210,150,0.10)';
-    for (let wy = baseY - bh + 5; wy < baseY - 3; wy += 8)
-      ctx.fillRect(bx + 4, wy, bw - 8, 2);
-    ctx.fillStyle = 'rgba(40,20,60,0.85)';
-  }
+  // A pale sun disc, simple and flat.
+  const camX = (playerLaneFloat(g) - (CONFIG.lanes - 1) / 2) * 14;
+  ctx.fillStyle = '#fff7d6';
+  ctx.beginPath(); ctx.arc(W - 84 - camX * 0.2, 46, 22, 0, Math.PI * 2); ctx.fill();
 
-  // Ground beyond the track.
-  const grd = ctx.createLinearGradient(0, hor, 0, H);
-  grd.addColorStop(0, '#241640');
-  grd.addColorStop(1, '#150d28');
-  ctx.fillStyle = grd;
-  ctx.fillRect(0, hor + 4, W, H - hor);
+  // Simple chunky clouds drifting slowly.
+  drawClouds(camX);
 
-  // Rushing side scenery (pylons) — strong sense of speed.
-  drawSideScenery(g);
-
-  // Speed motion lines from the vanishing point (scale with speed).
-  const speedLines = Math.min(18, 4 + Math.round((g.speedMult - 1) * 22));
-  ctx.save();
-  ctx.strokeStyle = 'rgba(255,255,255,0.10)';
-  ctx.lineWidth = 2;
-  const vpx = W / 2 - camX * 0.5, vpy = hor;
-  for (let i = 0; i < speedLines; i++) {
-    const ang = (i / speedLines) * Math.PI * 2 + fx.bgScroll * 0.02;
-    const z0 = ((i * 0.137 + fx.bgScroll * 0.012) % 1);
-    const r0 = 60 + z0 * 240, r1 = r0 + 30 + z0 * 90;
-    ctx.globalAlpha = 0.04 + z0 * 0.10;
+  // Distant snowy hills along the horizon.
+  ctx.fillStyle = '#ffffff';
+  for (let i = -1; i < 8; i++) {
+    const hx = ((i * 110 - camX * 0.35 - fx.bgScroll * 0.05) % (W + 220) + W + 220) % (W + 220) - 110;
+    const hw = 90 + (i % 3) * 30, hh = 26 + (i % 2) * 12;
     ctx.beginPath();
-    ctx.moveTo(vpx + Math.cos(ang) * r0, vpy + Math.sin(ang) * r0 * 0.7);
-    ctx.lineTo(vpx + Math.cos(ang) * r1, vpy + Math.sin(ang) * r1 * 0.7);
-    ctx.stroke();
+    ctx.moveTo(hx - hw / 2, hor);
+    ctx.quadraticCurveTo(hx, hor - hh, hx + hw / 2, hor);
+    ctx.closePath(); ctx.fill();
   }
-  ctx.restore();
+  // Soft blue shading line on the hills' base.
+  ctx.fillStyle = '#e3f3ff';
+  ctx.fillRect(0, hor - 2, W, 3);
+
+  // Snowfield ground (flat) + crisp horizon line.
+  ctx.fillStyle = SNOW_GROUND;
+  ctx.fillRect(0, hor, W, H - hor);
+  ctx.fillStyle = HORIZON;
+  ctx.fillRect(0, hor, W, 2);
+
+  // Off-track snow speckles rushing toward the camera (sense of speed).
+  drawSnowSpeckles(g, true);
 }
 
-// Neon pylons flanking the track that rush past as you run.
-function drawSideScenery(g) {
-  const N = 9;
-  const phase = (fx.bgScroll * 0.012) % 1;
-  const neon = ['#ff3d81', '#3df0ff', '#b14dff', '#ffd23d'];
-  for (let i = 0; i < N; i++) {
-    let z = ((i / N) + phase) % 1;
-    z = 1 - z; // near..far
-    if (z >= 0.985) continue;
+function drawClouds(camX) {
+  ctx.fillStyle = '#ffffff';
+  const clouds = [[120, 40, 1], [340, 26, 0.8], [520, 58, 1.1], [40, 70, 0.7]];
+  for (const [bx, by, sc] of clouds) {
+    const x = ((bx - fx.bgScroll * 0.12 - camX * 0.15) % 760 + 760) % 760 - 80;
+    puff(x, by, 22 * sc); puff(x + 20 * sc, by - 8 * sc, 18 * sc);
+    puff(x + 40 * sc, by, 22 * sc); puff(x + 20 * sc, by + 6 * sc, 20 * sc);
+  }
+}
+function puff(x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
+
+// Speckles of snow texture; on the off-track snow when `sides` is true.
+function drawSnowSpeckles(g, sides) {
+  const phase = (fx.bgScroll * 0.02) % 1;
+  ctx.fillStyle = '#dcefff';
+  for (let i = 0; i < 26; i++) {
+    let z = ((i * 0.0739 + phase) % 1);
+    z = 1 - z;
     const s = depthScale(z);
-    const col = neon[i % neon.length];
-    for (const side of [-1, 1]) {
-      const x = laneCenterX(side > 0 ? CONFIG.lanes - 0.5 : -0.5, z) + side * 30 * s;
-      const y = depthY(z);
-      const h = 70 * s, w = 9 * s;
-      ctx.save();
-      ctx.globalAlpha = Math.min(1, z * 1.3) * 0.9;
-      ctx.shadowColor = col; ctx.shadowBlur = 16 * s;
-      ctx.fillStyle = col;
-      ctx.fillRect(x - w / 2, y - h, w, h);
-      // glowing cap
-      ctx.beginPath(); ctx.arc(x, y - h, 5 * s, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
-    }
+    const seed = (i * 73 % 17) / 17 - 0.5;
+    // place on left or right of the track
+    const side = (i % 2) ? 1 : -1;
+    const edgeX = laneCenterX(side > 0 ? CONFIG.lanes - 0.5 : -0.5, z);
+    const x = edgeX + side * (20 + seed * 40) * s;
+    const y = depthY(z);
+    ctx.fillRect(x, y, 3 * s + 1, 3 * s + 1);
   }
 }
 
 function drawTrack(g) {
   ctx.save();
-  // Track polygon with a subtle gradient.
   const topL = laneCenterX(-0.5, 1), topR = laneCenterX(CONFIG.lanes - 0.5, 1);
   const botL = laneCenterX(-0.5, 0), botR = laneCenterX(CONFIG.lanes - 0.5, 0);
-  const tg = ctx.createLinearGradient(0, depthY(1), 0, depthY(0));
-  tg.addColorStop(0, '#2b2150');
-  tg.addColorStop(1, '#191236');
+
+  // Track snow (slightly brighter than the off-track field so lanes read).
   ctx.beginPath();
   ctx.moveTo(topL, depthY(1));
   ctx.lineTo(topR, depthY(1));
   ctx.lineTo(botR, depthY(0));
   ctx.lineTo(botL, depthY(0));
   ctx.closePath();
-  ctx.fillStyle = tg;
+  ctx.fillStyle = SNOW_TRACK;
   ctx.fill();
 
-  // Glowing track edge rails.
+  // Rushing horizontal snow bands toward the camera = forward speed.
+  const phase = (fx.bgScroll * 0.016) % 1;
+  for (let i = 0; i < 16; i++) {
+    let z = ((i / 16) + phase) % 1;
+    z = 1 - z;
+    const band = (i % 2 === 0);
+    ctx.fillStyle = band ? '#eaf6ff' : '#ffffff';
+    const yTop = depthY(z);
+    const yBot = depthY(Math.max(0, z - 0.06));
+    ctx.beginPath();
+    ctx.moveTo(laneCenterX(-0.5, z), yTop);
+    ctx.lineTo(laneCenterX(CONFIG.lanes - 0.5, z), yTop);
+    ctx.lineTo(laneCenterX(CONFIG.lanes - 0.5, z - 0.06), yBot);
+    ctx.lineTo(laneCenterX(-0.5, z - 0.06), yBot);
+    ctx.closePath();
+    if (band) ctx.fill();
+  }
+
+  // Crisp ice-blue track edges.
+  ctx.strokeStyle = '#6fb0dd';
+  ctx.lineWidth = 3;
   for (const edge of [-0.5, CONFIG.lanes - 0.5]) {
     ctx.beginPath();
     ctx.moveTo(laneCenterX(edge, 1), depthY(1));
     ctx.lineTo(laneCenterX(edge, 0), depthY(0));
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = '#36e0ff';
-    ctx.shadowColor = '#36e0ff'; ctx.shadowBlur = 12;
     ctx.stroke();
   }
-  ctx.shadowBlur = 0;
 
-  // Lane divider dashed lines.
-  ctx.strokeStyle = 'rgba(170,190,230,0.30)';
+  // Dashed lane dividers (light blue).
+  ctx.strokeStyle = 'rgba(120,180,220,0.55)';
   ctx.lineWidth = 2;
   for (let l = 1; l < CONFIG.lanes; l++) {
     const lf = l - 0.5;
-    ctx.beginPath();
-    ctx.moveTo(laneCenterX(lf, 1), depthY(1));
-    ctx.lineTo(laneCenterX(lf, 0), depthY(0));
-    ctx.stroke();
-  }
-
-  // Moving rungs (chevrons) for a strong sense of speed.
-  const phase = (fx.bgScroll * 0.014) % 1;
-  for (let i = 0; i < 14; i++) {
-    let z = ((i / 14) + phase) % 1;
-    z = 1 - z;
-    const a = Math.min(0.5, (1 - z) * 0.6);
-    ctx.strokeStyle = `rgba(120,200,255,${0.08 + a * 0.18})`;
-    ctx.lineWidth = 1 + (1 - z) * 2.5;
-    ctx.beginPath();
-    ctx.moveTo(laneCenterX(-0.5, z), depthY(z));
-    ctx.lineTo(laneCenterX((CONFIG.lanes - 1) / 2, z + 0.012), depthY(z) - 6 * (1 - z));
-    ctx.lineTo(laneCenterX(CONFIG.lanes - 0.5, z), depthY(z));
-    ctx.stroke();
+    const dphase = (fx.bgScroll * 0.016) % (1 / 8);
+    for (let k = 0; k < 8; k++) {
+      let z0 = (k / 8 + dphase) % 1, z1 = z0 - 0.06;
+      if (z1 < 0) continue;
+      z0 = 1 - z0; z1 = 1 - z1; // map near..far
+      ctx.beginPath();
+      ctx.moveTo(laneCenterX(lf, z0), depthY(z0));
+      ctx.lineTo(laneCenterX(lf, z1), depthY(z1));
+      ctx.stroke();
+    }
   }
   ctx.restore();
 }
@@ -738,133 +723,130 @@ function drawEntity(g, e) {
   if (e.collected || e.resolved) return;
 
   if (e.kind === KINDS.COIN) {
-    drawCoin(x, y - 30 * s, s, e.id);
+    drawFlag(x, y, s, e.id);
   } else if (e.kind === KINDS.GROUND) {
-    drawHurdle(x, y, s);
+    drawHole(x, y, s);
   } else if (e.kind === KINDS.BARRIER) {
-    drawBarrier(x, y, s);
+    drawIceBlock(x, y, s);
   }
 }
 
-// Spinning 3D-look gold coin with shine + sparkle. "JUMP/SWITCH" read N/A.
-function drawCoin(cx, cy, s, id) {
-  const t = fx.runPhase * 2.6 + (id || 0) * 1.3;
-  const ww = Math.abs(Math.cos(t));          // perspective squash -> 3D spin
-  const rw = 15 * s * (0.18 + 0.82 * ww);
-  const rh = 15 * s;
+// COIN -> a bright gold pennant flag on a pole (waves; simple collect pop).
+function drawFlag(x, y, s, id) {
+  const poleH = 40 * s;
+  const top = y - poleH;
+  const wave = Math.sin(fx.runPhase * 3 + (id || 0)) * 3 * s;
   ctx.save();
-  ctx.shadowColor = 'rgba(255,200,60,0.8)'; ctx.shadowBlur = 14 * s;
-  // edge / rim
-  ctx.fillStyle = '#b8860b';
-  ctx.beginPath(); ctx.ellipse(cx, cy, rw + 2 * s, rh + 2 * s, 0, 0, Math.PI * 2); ctx.fill();
-  // face
-  const cg = ctx.createLinearGradient(cx - rw, cy - rh, cx + rw, cy + rh);
-  cg.addColorStop(0, '#fff1a8');
-  cg.addColorStop(0.5, '#ffcf3a');
-  cg.addColorStop(1, '#d99a16');
-  ctx.fillStyle = cg;
-  ctx.beginPath(); ctx.ellipse(cx, cy, rw, rh, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.shadowBlur = 0;
-  // star emboss
-  if (ww > 0.3) {
-    ctx.fillStyle = 'rgba(180,120,10,0.55)';
-    ctx.font = `bold ${16 * s * ww}px Segoe UI, sans-serif`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('★', cx, cy + 1 * s);
-  }
-  // moving shine streak
-  ctx.globalAlpha = 0.8;
-  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  // contact shadow
+  ctx.fillStyle = 'rgba(120,160,190,0.25)';
+  ctx.beginPath(); ctx.ellipse(x, y, 10 * s, 4 * s, 0, 0, Math.PI * 2); ctx.fill();
+  // pole
+  ctx.fillStyle = '#9fb3c4';
+  ctx.fillRect(x - 1.5 * s, top, 3 * s, poleH);
+  ctx.fillStyle = '#cdd9e4';
+  ctx.fillRect(x - 1.5 * s, top, 1.5 * s, poleH);
+  // gold pennant (triangle) with darker fold + highlight
+  ctx.fillStyle = '#ffcf2e';
   ctx.beginPath();
-  ctx.ellipse(cx - rw * 0.35, cy - rh * 0.4, rw * 0.18, rh * 0.55, -0.4, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.moveTo(x + 1.5 * s, top + 1 * s);
+  ctx.lineTo(x + 24 * s + wave, top + 8 * s);
+  ctx.lineTo(x + 1.5 * s, top + 16 * s);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#ffe680';
+  ctx.beginPath();
+  ctx.moveTo(x + 1.5 * s, top + 1 * s);
+  ctx.lineTo(x + 14 * s + wave * 0.5, top + 5 * s);
+  ctx.lineTo(x + 1.5 * s, top + 8 * s);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#e0a700';
+  ctx.fillRect(x + 1.5 * s, top + 14 * s, 22 * s, 1.5 * s);
+  // little gold ball on top of the pole
+  ctx.fillStyle = '#ffd23d';
+  ctx.beginPath(); ctx.arc(x, top, 3 * s, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
-  // periodic sparkle
-  if (((t * 0.5) % 6.283) < 0.25) {
-    addParticle({ x: cx + rw, y: cy - rh, vx: 0, vy: 0, life: 10, size: 3 * s,
-      color: '#ffffff', grav: 0, shape: 'spark' });
-  }
 }
 
-// GROUND hurdle: short, striped, with a "JUMP" cue — chunky with shading.
-function drawHurdle(x, y, s) {
-  const w = 74 * s, h = 30 * s;
-  const top = y - h;
+// GROUND -> an ice hole / pit in the snow you must JUMP over. Flat, low.
+function drawHole(x, y, s) {
+  const rw = 40 * s, rh = 15 * s;
   ctx.save();
-  // soft contact shadow
-  ctx.fillStyle = 'rgba(0,0,0,0.30)';
-  ctx.beginPath(); ctx.ellipse(x, y + 2, w * 0.55, 7 * s, 0, 0, Math.PI * 2); ctx.fill();
-  // legs
-  ctx.fillStyle = '#7a2230';
-  ctx.fillRect(x - w / 2, top, 8 * s, h + 6 * s);
-  ctx.fillRect(x + w / 2 - 8 * s, top, 8 * s, h + 6 * s);
-  // bar with hazard stripes
-  const bg = ctx.createLinearGradient(0, top, 0, top + h);
-  bg.addColorStop(0, '#ff8a5b'); bg.addColorStop(1, '#e23d5a');
-  ctx.fillStyle = bg;
-  roundRect(x - w / 2, top, w, h, 6 * s); ctx.fill();
-  ctx.save();
-  roundRect(x - w / 2, top, w, h, 6 * s); ctx.clip();
-  ctx.strokeStyle = 'rgba(20,10,20,0.55)'; ctx.lineWidth = 7 * s;
-  for (let i = -2; i < 10; i++) {
+  // bright ice rim
+  ctx.fillStyle = '#bfe6ff';
+  ctx.beginPath(); ctx.ellipse(x, y - rh * 0.2, rw + 4 * s, rh + 3 * s, 0, 0, Math.PI * 2); ctx.fill();
+  // dark water/void
+  ctx.fillStyle = '#1f4e7a';
+  ctx.beginPath(); ctx.ellipse(x, y - rh * 0.2, rw, rh, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#16395c';
+  ctx.beginPath(); ctx.ellipse(x, y - rh * 0.2 + 2 * s, rw * 0.8, rh * 0.7, 0, 0, Math.PI * 2); ctx.fill();
+  // ice cracks on the rim
+  ctx.strokeStyle = '#9fd0f0'; ctx.lineWidth = 1.5 * s;
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2 + 0.4;
     ctx.beginPath();
-    ctx.moveTo(x - w / 2 + i * 14 * s, top - 4);
-    ctx.lineTo(x - w / 2 + i * 14 * s - 18 * s, top + h + 4);
+    ctx.moveTo(x + Math.cos(a) * rw, y - rh * 0.2 + Math.sin(a) * rh);
+    ctx.lineTo(x + Math.cos(a) * (rw + 6 * s), y - rh * 0.2 + Math.sin(a) * (rh + 5 * s));
     ctx.stroke();
   }
-  ctx.restore();
-  // top highlight
-  ctx.fillStyle = 'rgba(255,255,255,0.35)';
-  ctx.fillRect(x - w / 2 + 3 * s, top + 2 * s, w - 6 * s, 3 * s);
-  // up-arrow "JUMP" cue floating above
+  // "JUMP" read: bobbing up-chevrons above the hole.
   const bob = Math.sin(fx.runPhase * 3) * 3 * s;
-  ctx.fillStyle = 'rgba(255,240,150,0.95)';
-  ctx.font = `bold ${13 * s}px Segoe UI, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.fillText('▲ JUMP', x, top - 8 * s + bob);
+  ctx.fillStyle = '#1f7a3a';
+  for (let i = 0; i < 2; i++) chevron(x, y - rh - (18 + i * 9) * s + bob, 9 * s, -1);
   ctx.restore();
 }
 
-// BARRIER: tall solid neon slab — clearly "can't jump, switch lane".
-function drawBarrier(x, y, s) {
-  const w = 80 * s, h = 96 * s;
+// BARRIER -> a tall solid ice block you must DODGE (switch lane). Chunky 3D.
+function drawIceBlock(x, y, s) {
+  const w = 56 * s, h = 70 * s, d = 16 * s; // width, height, iso depth
   const top = y - h;
   ctx.save();
-  ctx.fillStyle = 'rgba(0,0,0,0.32)';
-  ctx.beginPath(); ctx.ellipse(x, y + 2, w * 0.55, 8 * s, 0, 0, Math.PI * 2); ctx.fill();
-  // body with neon gradient + glow
-  ctx.shadowColor = '#5d8df8'; ctx.shadowBlur = 18 * s;
-  const bg = ctx.createLinearGradient(x - w / 2, 0, x + w / 2, 0);
-  bg.addColorStop(0, '#3457c9'); bg.addColorStop(0.5, '#6f9bff'); bg.addColorStop(1, '#2a3f9e');
-  ctx.fillStyle = bg;
-  roundRect(x - w / 2, top, w, h, 8 * s); ctx.fill();
-  ctx.shadowBlur = 0;
-  // neon frame
-  ctx.lineWidth = 3 * s; ctx.strokeStyle = '#bcd4ff';
-  roundRect(x - w / 2 + 3 * s, top + 3 * s, w - 6 * s, h - 6 * s, 6 * s); ctx.stroke();
-  // hazard chevrons
-  ctx.fillStyle = 'rgba(255,255,255,0.18)';
-  for (let i = 0; i < 4; i++) {
-    const yy = top + 10 * s + i * (h - 16 * s) / 4;
-    ctx.beginPath();
-    ctx.moveTo(x - w / 2 + 8 * s, yy);
-    ctx.lineTo(x, yy + 10 * s);
-    ctx.lineTo(x + w / 2 - 8 * s, yy);
-    ctx.lineTo(x + w / 2 - 8 * s, yy + 5 * s);
-    ctx.lineTo(x, yy + 15 * s);
-    ctx.lineTo(x - w / 2 + 8 * s, yy + 5 * s);
-    ctx.closePath(); ctx.fill();
-  }
-  // no-jump cue
-  const bob = Math.sin(fx.runPhase * 3 + 1) * 3 * s;
-  ctx.fillStyle = 'rgba(190,220,255,0.95)';
-  ctx.font = `bold ${12 * s}px Segoe UI, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.fillText('◀ ▶ DODGE', x, top - 8 * s + bob);
+  // shadow
+  ctx.fillStyle = 'rgba(120,160,190,0.30)';
+  ctx.beginPath(); ctx.ellipse(x, y + 2, w * 0.65, 7 * s, 0, 0, Math.PI * 2); ctx.fill();
+  // right side face (darker)
+  ctx.fillStyle = '#6db4e6';
+  ctx.beginPath();
+  ctx.moveTo(x + w / 2, top); ctx.lineTo(x + w / 2 + d, top - d);
+  ctx.lineTo(x + w / 2 + d, y - d); ctx.lineTo(x + w / 2, y);
+  ctx.closePath(); ctx.fill();
+  // top face (lightest)
+  ctx.fillStyle = '#eaf8ff';
+  ctx.beginPath();
+  ctx.moveTo(x - w / 2, top); ctx.lineTo(x - w / 2 + d, top - d);
+  ctx.lineTo(x + w / 2 + d, top - d); ctx.lineTo(x + w / 2, top);
+  ctx.closePath(); ctx.fill();
+  // front face
+  ctx.fillStyle = '#a6dbff';
+  ctx.fillRect(x - w / 2, top, w, h);
+  // facets / shading blocks on front
+  ctx.fillStyle = '#c4e8ff';
+  ctx.fillRect(x - w / 2 + 5 * s, top + 6 * s, w * 0.34, h * 0.34);
+  ctx.fillStyle = '#8cccf2';
+  ctx.fillRect(x - w / 2 + w * 0.5, top + h * 0.45, w * 0.36, h * 0.4);
+  // bright edge highlights
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2 * s;
+  ctx.strokeRect(x - w / 2, top, w, h);
+  // glint
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(x - w / 2 + 7 * s, top + 8 * s, 4 * s, 14 * s);
+  // "DODGE" read: side chevrons.
+  const bob = Math.sin(fx.runPhase * 3 + 1) * 2 * s;
+  ctx.fillStyle = '#b3361f';
+  chevron(x - w / 2 - 12 * s + bob, top - 8 * s, 8 * s, 2);  // left arrow
+  chevron(x + w / 2 + 12 * s - bob, top - 8 * s, 8 * s, 3);  // right arrow
   ctx.restore();
 }
 
-// ---- The mascot: a lively running fox -----------------------------------
+// Small filled chevron arrow. dir: -1 up, 1 down, 2 left, 3 right.
+function chevron(cx, cy, r, dir) {
+  ctx.beginPath();
+  if (dir === -1) { ctx.moveTo(cx - r, cy + r); ctx.lineTo(cx, cy - r); ctx.lineTo(cx + r, cy + r); ctx.lineTo(cx, cy); }
+  else if (dir === 1) { ctx.moveTo(cx - r, cy - r); ctx.lineTo(cx, cy + r); ctx.lineTo(cx + r, cy - r); ctx.lineTo(cx, cy); }
+  else if (dir === 2) { ctx.moveTo(cx + r, cy - r); ctx.lineTo(cx - r, cy); ctx.lineTo(cx + r, cy + r); ctx.lineTo(cx, cy); }
+  else { ctx.moveTo(cx - r, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx - r, cy + r); ctx.lineTo(cx, cy); }
+  ctx.closePath(); ctx.fill();
+}
+
+// ---- The runner: a cute waddling penguin (front view) --------------------
 function drawPlayer(g) {
   const lf = playerLaneFloat(g);
   const z = CONFIG.zPlayer;
@@ -875,148 +857,107 @@ function drawPlayer(g) {
   const lift = liftN * 135;
   const air = g.jumpT > 0;
 
-  // Shadow shrinks + fades as the runner rises.
+  // Round shadow, shrinks + fades as the penguin hops.
   ctx.save();
-  ctx.globalAlpha = 0.38 * (1 - liftN * 0.7);
-  ctx.fillStyle = '#000';
+  ctx.globalAlpha = 0.30 * (1 - liftN * 0.7);
+  ctx.fillStyle = '#7fb0cf';
   ctx.beginPath();
-  ctx.ellipse(x, baseY + 2, (34 - liftN * 16) * s, (11 - liftN * 5) * s, 0, 0, Math.PI * 2);
+  ctx.ellipse(x, baseY + 2, (30 - liftN * 14) * s, (9 - liftN * 4) * s, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 
-  // Squash & stretch.
+  // Hop squash & stretch + waddle rock.
   let sx = 1, sy = 1;
   if (air) {
-    const vel = Math.cos(Math.PI * (1 - g.jumpT / CONFIG.jumpTicks)); // +rising / -falling
-    sy = 1 + vel * 0.16; sx = 1 - vel * 0.12;
+    const vel = Math.cos(Math.PI * (1 - g.jumpT / CONFIG.jumpTicks));
+    sy = 1 + vel * 0.14; sx = 1 - vel * 0.10;
   }
-  if (fx.land > 0) { sy *= 1 - 0.34 * fx.land; sx *= 1 + 0.30 * fx.land; }
-
-  // Running bob (vertical) + lean.
+  if (fx.land > 0) { sy *= 1 - 0.30 * fx.land; sx *= 1 + 0.26 * fx.land; }
   const run = fx.runPhase;
   const bob = air ? 0 : Math.abs(Math.sin(run)) * 4 * s;
-  const lean = air ? 0.04 : Math.sin(run) * 0.03;
+  const rock = air ? 0 : Math.sin(run) * 0.10; // side-to-side waddle
 
   ctx.save();
   ctx.translate(x, baseY - lift - bob);
-  ctx.rotate(lean);
+  ctx.rotate(rock);
   ctx.scale(sx, sy);
-  ctx.scale(s, s); // now draw in local units (~ -1 px scale), feet at y=0
-
-  drawFox(g, run, air);
+  ctx.scale(s, s);
+  drawPenguin(g, run, air);
   ctx.restore();
 }
 
-// Draws the fox in local space: feet at y=0, body extends upward (-y).
-function drawFox(g, run, air) {
-  const ORANGE = '#ff9b3d', ORANGE_D = '#ef7d22', CREAM = '#ffe9c7', DARK = '#3a2417';
-  const hipY = -26, shoulderY = -50, headY = -70;
+// Penguin in local space: feet at y=0, body up in -y. Flat retro colors.
+function drawPenguin(g, run, air) {
+  const BLACK = '#23303a', BELLY = '#ffffff', ORANGE = '#ff9f1c', ORANGE_D = '#e07d05';
+  const step = air ? 0 : Math.sin(run);
 
-  // Tail (behind body) — wags with run cycle.
-  const tw = Math.sin(run * 1.2) * 0.5;
-  ctx.save();
-  ctx.translate(-14, hipY - 4);
-  ctx.rotate(0.5 + tw);
+  // Feet (orange) — alternate when waddling, tuck up a touch when airborne.
+  const fy = air ? -8 : 0;
   ctx.fillStyle = ORANGE;
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.quadraticCurveTo(-26, -2, -34, 16);
-  ctx.quadraticCurveTo(-22, 8, 0, 10);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = CREAM; // tail tip
-  ctx.beginPath(); ctx.ellipse(-32, 14, 7, 8, 0.4, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-
-  // Legs — swing opposite phases (tuck when airborne).
-  const legSwing = air ? -0.5 : Math.sin(run) * 0.85;
-  drawLimb(-7, hipY, (air ? 0.6 : 0) + legSwing, 22, 8, ORANGE_D, DARK);   // back leg
-  drawLimb(7, hipY, (air ? 0.6 : 0) - legSwing, 22, 8, ORANGE, DARK);      // front leg
-
-  // Back arm (behind body).
-  const armSwing = air ? 0.9 : Math.sin(run + Math.PI) * 0.9;
-  drawLimb(-9, shoulderY + 4, (air ? -1.7 : 0) - armSwing, 18, 7, ORANGE_D, CREAM);
-
-  // Body (egg-shaped) with belly.
-  ctx.fillStyle = ORANGE;
-  ctx.beginPath();
-  ctx.ellipse(0, (hipY + shoulderY) / 2, 16, 18, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = CREAM; // belly
-  ctx.beginPath();
-  ctx.ellipse(3, (hipY + shoulderY) / 2 + 2, 9, 13, 0.1, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Front arm (over body).
-  drawLimb(8, shoulderY + 4, (air ? -1.9 : 0) + armSwing, 18, 7, ORANGE, CREAM);
-
-  // Head.
-  ctx.save();
-  ctx.translate(2, headY);
-  ctx.rotate(air ? -0.12 : Math.sin(run) * 0.05);
-  // ears
-  ctx.fillStyle = ORANGE;
-  for (const ex of [-9, 9]) {
+  for (const side of [-1, 1]) {
+    const fx2 = side * 7 + (air ? 0 : step * side * 3);
+    const fup = air ? 4 : Math.max(0, Math.sin(run + (side > 0 ? 0 : Math.PI))) * 3;
     ctx.beginPath();
-    ctx.moveTo(ex, -6); ctx.lineTo(ex + (ex < 0 ? -3 : 3), -20); ctx.lineTo(ex + (ex < 0 ? 7 : -7), -7);
-    ctx.closePath(); ctx.fill();
+    ctx.ellipse(fx2, fy - fup, 7, 4, 0, 0, Math.PI * 2); ctx.fill();
   }
-  ctx.fillStyle = DARK; // ear tips
-  for (const ex of [-9, 9]) {
-    ctx.beginPath();
-    ctx.moveTo(ex + (ex < 0 ? -3 : 3), -20); ctx.lineTo(ex + (ex < 0 ? 1 : -1), -13); ctx.lineTo(ex + (ex < 0 ? 3 : -3), -14);
-    ctx.closePath(); ctx.fill();
-  }
-  // face
-  ctx.fillStyle = ORANGE;
-  ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2); ctx.fill();
-  // cheeks/muzzle cream
-  ctx.fillStyle = CREAM;
-  ctx.beginPath(); ctx.ellipse(0, 4, 10, 8, 0, 0, Math.PI * 2); ctx.fill();
-  // snout
-  ctx.fillStyle = ORANGE;
-  ctx.beginPath(); ctx.moveTo(-5, 2); ctx.lineTo(5, 2); ctx.lineTo(0, 12); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = DARK; // nose
-  ctx.beginPath(); ctx.arc(0, 9, 2.6, 0, Math.PI * 2); ctx.fill();
-  // eyes (big, forward) + blink-free shine
-  const eyeY = -2;
-  for (const ex of [-6, 6]) {
-    ctx.fillStyle = '#fff';
-    ctx.beginPath(); ctx.ellipse(ex, eyeY, 3.4, 4.2, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = DARK;
-    ctx.beginPath(); ctx.arc(ex + 1, eyeY + 0.5, 2.1, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.beginPath(); ctx.arc(ex + 1.8, eyeY - 0.8, 0.8, 0, Math.PI * 2); ctx.fill();
-  }
-  // blush
-  ctx.fillStyle = 'rgba(255,120,120,0.35)';
-  ctx.beginPath(); ctx.arc(-9, 4, 2.6, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(9, 4, 2.6, 0, Math.PI * 2); ctx.fill();
-  // determined eyebrows
-  ctx.strokeStyle = DARK; ctx.lineWidth = 1.4;
-  ctx.beginPath(); ctx.moveTo(-9, eyeY - 6); ctx.lineTo(-3, eyeY - 5); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(9, eyeY - 6); ctx.lineTo(3, eyeY - 5); ctx.stroke();
-  ctx.restore();
 
-  // Airborne sparkle aura.
+  // Body: rounded black egg with a big white belly.
+  const bodyCY = -28;
+  ctx.fillStyle = BLACK;
+  ctx.beginPath();
+  ctx.ellipse(0, bodyCY, 17, 22, 0, 0, Math.PI * 2); ctx.fill();
+  // white belly
+  ctx.fillStyle = BELLY;
+  ctx.beginPath();
+  ctx.ellipse(0, bodyCY + 2, 11, 17, 0, 0, Math.PI * 2); ctx.fill();
+
+  // Flippers (black) — swing a little; raise when airborne.
+  ctx.fillStyle = BLACK;
+  for (const side of [-1, 1]) {
+    const sw = air ? -0.9 : Math.sin(run + (side > 0 ? Math.PI : 0)) * 0.5;
+    ctx.save();
+    ctx.translate(side * 16, bodyCY - 2);
+    ctx.rotate(side * (0.5 + sw));
+    ctx.beginPath();
+    ctx.ellipse(0, 8, 5, 12, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // Head (merges with body): black dome.
+  const headCY = -52;
+  ctx.fillStyle = BLACK;
+  ctx.beginPath(); ctx.arc(0, headCY, 15, 0, Math.PI * 2); ctx.fill();
+  // white face patch
+  ctx.fillStyle = BELLY;
+  ctx.beginPath(); ctx.ellipse(0, headCY + 2, 10, 9, 0, 0, Math.PI * 2); ctx.fill();
+  // eyes
+  ctx.fillStyle = BLACK;
+  ctx.beginPath(); ctx.arc(-4.5, headCY - 1, 2.3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(4.5, headCY - 1, 2.3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.arc(-3.8, headCY - 1.8, 0.8, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(5.2, headCY - 1.8, 0.8, 0, Math.PI * 2); ctx.fill();
+  // beak (orange diamond)
+  ctx.fillStyle = ORANGE;
+  ctx.beginPath();
+  ctx.moveTo(-4, headCY + 5); ctx.lineTo(4, headCY + 5);
+  ctx.lineTo(0, headCY + 11); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = ORANGE_D;
+  ctx.fillRect(-4, headCY + 6.5, 8, 1.4);
+  // rosy cheeks
+  ctx.fillStyle = 'rgba(255,140,140,0.45)';
+  ctx.beginPath(); ctx.arc(-7.5, headCY + 3, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(7.5, headCY + 3, 2, 0, Math.PI * 2); ctx.fill();
+
+  // Tiny "wheee" sparkles when hopping.
   if (air) {
-    ctx.strokeStyle = 'rgba(255,230,140,0.5)'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(0, shoulderY + 6, 30, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillRect(-22, headCY - 6, 3, 3);
+    ctx.fillRect(20, headCY + 2, 3, 3);
   }
 }
 
-// A rounded-capsule limb rotated about its top joint; draws a foot/paw cap.
-function drawLimb(ox, oy, angle, len, w, color, footColor) {
-  ctx.save();
-  ctx.translate(ox, oy);
-  ctx.rotate(angle);
-  ctx.fillStyle = color;
-  roundRect(-w / 2, 0, w, len, w / 2); ctx.fill();
-  ctx.fillStyle = footColor;
-  ctx.beginPath(); ctx.ellipse(0, len, w * 0.7, w * 0.5, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-}
-
-// ---- Particles & pops ----------------------------------------------------
+// ---- Particles & pops (flat, retro) --------------------------------------
 function drawParticles(layer) {
   for (const p of fx.particles) {
     if ((p.layer || 'front') !== layer) continue;
@@ -1024,13 +965,14 @@ function drawParticles(layer) {
     ctx.save();
     ctx.globalAlpha = a;
     ctx.translate(p.x, p.y);
-    ctx.rotate(p.rot);
+    // chunky pixel particles (no rotation blur) for the retro look
     ctx.fillStyle = p.color;
+    const sz = Math.max(2, Math.round(p.size));
     if (p.shape === 'spark') {
-      ctx.fillRect(-p.size / 2, -p.size / 6, p.size, p.size / 3);
-      ctx.fillRect(-p.size / 6, -p.size / 2, p.size / 3, p.size);
+      ctx.fillRect(-sz, -1, sz * 2, 2);
+      ctx.fillRect(-1, -sz, 2, sz * 2);
     } else {
-      ctx.beginPath(); ctx.arc(0, 0, p.size, 0, Math.PI * 2); ctx.fill();
+      ctx.fillRect(-sz / 2, -sz / 2, sz, sz);
     }
     ctx.restore();
   }
@@ -1039,13 +981,8 @@ function drawParticles(layer) {
 function drawPops() {
   for (const p of fx.pops) {
     const a = 1 - p.t / p.max;
-    ctx.save();
-    ctx.globalAlpha = a;
-    ctx.fillStyle = p.color;
-    ctx.font = 'bold 18px Segoe UI, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(p.text, p.x, p.y - p.t * 0.9);
-    ctx.restore();
+    drawPixelText(p.text, p.x - p.text.length * 6, p.y - p.t * 0.9, 2,
+      hexFade(p.color, a));
   }
 }
 
@@ -1059,62 +996,165 @@ function roundRect(x, y, w, h, r) {
   ctx.closePath();
 }
 
-function drawCenterText(text, color) {
+// ---- Retro 5x7 pixel font + chunky text ----------------------------------
+const FONT = (() => {
+  const g = {};
+  const def = (ch, rows) => { g[ch] = rows; };
+  def('0', ['01110','10001','10011','10101','11001','10001','01110']);
+  def('1', ['00100','01100','00100','00100','00100','00100','01110']);
+  def('2', ['01110','10001','00001','00010','00100','01000','11111']);
+  def('3', ['11111','00010','00100','00010','00001','10001','01110']);
+  def('4', ['00010','00110','01010','10010','11111','00010','00010']);
+  def('5', ['11111','10000','11110','00001','00001','10001','01110']);
+  def('6', ['00110','01000','10000','11110','10001','10001','01110']);
+  def('7', ['11111','00001','00010','00100','01000','01000','01000']);
+  def('8', ['01110','10001','10001','01110','10001','10001','01110']);
+  def('9', ['01110','10001','10001','01111','00001','00010','01100']);
+  def('A', ['01110','10001','10001','11111','10001','10001','10001']);
+  def('B', ['11110','10001','10001','11110','10001','10001','11110']);
+  def('C', ['01110','10001','10000','10000','10000','10001','01110']);
+  def('D', ['11110','10001','10001','10001','10001','10001','11110']);
+  def('E', ['11111','10000','10000','11110','10000','10000','11111']);
+  def('F', ['11111','10000','10000','11110','10000','10000','10000']);
+  def('G', ['01110','10001','10000','10111','10001','10001','01110']);
+  def('H', ['10001','10001','10001','11111','10001','10001','10001']);
+  def('I', ['01110','00100','00100','00100','00100','00100','01110']);
+  def('J', ['00111','00010','00010','00010','10010','10010','01100']);
+  def('K', ['10001','10010','10100','11000','10100','10010','10001']);
+  def('L', ['10000','10000','10000','10000','10000','10000','11111']);
+  def('M', ['10001','11011','10101','10101','10001','10001','10001']);
+  def('N', ['10001','11001','10101','10011','10001','10001','10001']);
+  def('O', ['01110','10001','10001','10001','10001','10001','01110']);
+  def('P', ['11110','10001','10001','11110','10000','10000','10000']);
+  def('Q', ['01110','10001','10001','10001','10101','10010','01101']);
+  def('R', ['11110','10001','10001','11110','10100','10010','10001']);
+  def('S', ['01111','10000','10000','01110','00001','00001','11110']);
+  def('T', ['11111','00100','00100','00100','00100','00100','00100']);
+  def('U', ['10001','10001','10001','10001','10001','10001','01110']);
+  def('V', ['10001','10001','10001','10001','10001','01010','00100']);
+  def('W', ['10001','10001','10001','10101','10101','11011','10001']);
+  def('X', ['10001','10001','01010','00100','01010','10001','10001']);
+  def('Y', ['10001','10001','01010','00100','00100','00100','00100']);
+  def('Z', ['11111','00001','00010','00100','01000','10000','11111']);
+  def(' ', ['00000','00000','00000','00000','00000','00000','00000']);
+  def(':', ['00000','00100','00000','00000','00000','00100','00000']);
+  def('.', ['00000','00000','00000','00000','00000','01100','01100']);
+  def('-', ['00000','00000','00000','11111','00000','00000','00000']);
+  def('/', ['00001','00001','00010','00100','01000','10000','10000']);
+  def('+', ['00000','00100','00100','11111','00100','00100','00000']);
+  def('!', ['00100','00100','00100','00100','00100','00000','00100']);
+  def('%', ['11001','11010','00100','01000','01011','10011','00000']);
+  return g;
+})();
+
+function drawPixelText(text, x, y, scale, color) {
   ctx.save();
-  ctx.fillStyle = 'rgba(8,10,14,0.55)';
-  ctx.fillRect(0, CONFIG.canvasH / 2 - 70, CONFIG.canvasW, 140);
-  ctx.fillStyle = color || '#fff';
-  ctx.font = 'bold 44px Segoe UI, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.shadowColor = color || '#fff'; ctx.shadowBlur = 20;
-  ctx.fillText(text, CONFIG.canvasW / 2, CONFIG.canvasH / 2);
+  ctx.fillStyle = color;
+  let cx = x;
+  for (const chRaw of String(text)) {
+    const ch = chRaw.toUpperCase();
+    const glyph = FONT[ch] || FONT[' '];
+    for (let r = 0; r < 7; r++) {
+      const row = glyph[r];
+      for (let c = 0; c < 5; c++) {
+        if (row[c] === '1') ctx.fillRect(cx + c * scale, y + r * scale, scale, scale);
+      }
+    }
+    cx += 6 * scale;
+  }
   ctx.restore();
+  return cx - x; // width drawn
+}
+function pixelTextWidth(text, scale) { return String(text).length * 6 * scale; }
+function hexFade(hex, a) {
+  // accepts #rrggbb -> rgba with alpha
+  if (hex[0] !== '#' || hex.length < 7) return hex;
+  const r = parseInt(hex.slice(1, 3), 16), gg = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${gg},${b},${a})`;
+}
+
+// ---- Retro HUD bar across the top (like the original) --------------------
+function drawHUD(g) {
+  const W = CONFIG.canvasW, barH = 30;
+  // bar background
+  ctx.fillStyle = '#10233f';
+  ctx.fillRect(0, 0, W, barH);
+  ctx.fillStyle = '#1d3a63';
+  ctx.fillRect(0, barH - 3, W, 3);
+  ctx.fillStyle = '#2e5891';
+  ctx.fillRect(0, 0, W, 2);
+
+  const sec = Math.floor(g.tick / 60);
+  const time = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+  const fields = [
+    ['SCORE', String(g.score).padStart(5, '0'), '#ffe14d'],
+    ['TIME', time, '#9fe0ff'],
+    ['DIST', String(Math.round(g.distance)).padStart(4, '0') + 'M', '#9fffb0'],
+    ['SPD', g.speedMult.toFixed(1) + 'X', '#ffb0d0'],
+  ];
+  const colW = W / fields.length;
+  for (let i = 0; i < fields.length; i++) {
+    const [label, val, col] = fields[i];
+    const baseX = Math.round(i * colW + 8);
+    drawPixelText(label, baseX, 5, 1, '#7fa8d8');
+    drawPixelText(val, baseX, 14, 2, col);
+  }
+  // coin tally on the far right corner of the score field
+  const cx = Math.round(colW - 22);
+  ctx.fillStyle = '#ffcf2e';
+  ctx.fillRect(cx, 6, 6, 8);
+  ctx.fillStyle = '#e0a700';
+  ctx.fillRect(cx, 6, 6, 2);
+  drawPixelText(String(g.coins), cx + 9, 6, 1, '#ffe14d');
+}
+
+function drawCenterText(text, color) {
+  const W = CONFIG.canvasW, H = CONFIG.canvasH;
+  ctx.save();
+  ctx.fillStyle = 'rgba(16,35,63,0.55)';
+  ctx.fillRect(0, H / 2 - 36, W, 72);
+  ctx.fillStyle = '#10233f';
+  ctx.fillRect(0, H / 2 - 36, W, 4);
+  ctx.fillRect(0, H / 2 + 32, W, 4);
+  ctx.restore();
+  const sc = 5;
+  const w = pixelTextWidth(text, sc);
+  drawPixelText(text, (W - w) / 2, H / 2 - 17, sc, color || '#ffffff');
 }
 
 function drawGameOver(g) {
-  const cx = CONFIG.canvasW / 2, cy = CONFIG.canvasH / 2;
+  const W = CONFIG.canvasW, H = CONFIG.canvasH, cx = W / 2;
   const t = Math.min(1, fx.overT / 18);
   ctx.save();
-  ctx.fillStyle = `rgba(10,6,22,${0.74 * t})`;
-  ctx.fillRect(0, 0, CONFIG.canvasW, CONFIG.canvasH);
-  // Pop-in scale for the title.
-  const sc = 0.6 + 0.4 * easeInOut(t) + Math.sin(fx.overT * 0.12) * 0.02;
-  ctx.translate(cx, cy - 60);
-  ctx.scale(sc, sc);
-  ctx.textAlign = 'center';
-  ctx.shadowColor = '#ff4d6d'; ctx.shadowBlur = 24;
-  ctx.fillStyle = '#ff6b8b';
-  ctx.font = 'bold 56px Segoe UI, sans-serif';
-  ctx.fillText('GAME OVER', 0, 0);
+  ctx.fillStyle = `rgba(16,35,63,${0.7 * t})`;
+  ctx.fillRect(0, 0, W, H);
   ctx.restore();
 
-  ctx.save();
-  ctx.globalAlpha = t;
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#ffd166';
-  ctx.font = 'bold 22px Segoe UI, sans-serif';
-  const what = g.deathBy === KINDS.BARRIER ? 'Crashed into a barrier'
-             : g.deathBy === KINDS.GROUND ? 'Tripped on a hurdle' : 'Wiped out';
-  ctx.fillText(what, cx, cy - 6);
-  ctx.fillStyle = '#e6edf3';
-  ctx.font = '20px Segoe UI, sans-serif';
-  ctx.fillText(`Score ${g.score}   ·   ⛁ ${g.coins}   ·   ${Math.round(g.distance)}m`, cx, cy + 28);
-  ctx.fillStyle = '#9aa6c2';
-  ctx.font = '16px Segoe UI, sans-serif';
-  const pulse = 0.6 + 0.4 * Math.abs(Math.sin(fx.overT * 0.08));
-  ctx.globalAlpha = t * pulse;
-  ctx.fillText('Press  R  to run again', cx, cy + 70);
-  ctx.restore();
+  // Title with a tiny retro bob.
+  const sc = 5 + Math.round(Math.sin(fx.overT * 0.12) * 0.5);
+  const title = 'GAME OVER';
+  drawPixelText(title, (W - pixelTextWidth(title, sc)) / 2, H / 2 - 90, sc, '#ff5d6c');
+
+  if (t > 0.5) {
+    const what = g.deathBy === KINDS.BARRIER ? 'HIT AN ICE BLOCK'
+               : g.deathBy === KINDS.GROUND ? 'FELL IN A HOLE' : 'WIPED OUT';
+    drawPixelText(what, (W - pixelTextWidth(what, 2)) / 2, H / 2 - 30, 2, '#ffe14d');
+    const line = `SCORE ${g.score}  FLAGS ${g.coins}  ${Math.round(g.distance)}M`;
+    drawPixelText(line, (W - pixelTextWidth(line, 2)) / 2, H / 2 + 6, 2, '#ffffff');
+    const blink = (Math.floor(fx.overT / 18) % 2) === 0;
+    if (blink) {
+      const pr = 'PRESS R TO RUN AGAIN';
+      drawPixelText(pr, (W - pixelTextWidth(pr, 2)) / 2, H / 2 + 50, 2, '#9fe0ff');
+    }
+  }
 }
 
 // ---- HUD -----------------------------------------------------------------
+// The score/time/dist/speed readout now lives on the canvas (drawHUD).
+// Here we only mirror the LLM-facing state text into the side panel.
 function updateHud(g) {
-  document.getElementById('score').textContent = g.score;
-  document.getElementById('coins').textContent = g.coins;
-  document.getElementById('dist').textContent = Math.round(g.distance);
-  document.getElementById('speed').textContent = g.speedMult.toFixed(1);
-  document.getElementById('state').textContent = g.lastState || '—';
+  const el = document.getElementById('state');
+  if (el) el.textContent = g.lastState || '—';
 }
 
 // ---- Input ---------------------------------------------------------------
