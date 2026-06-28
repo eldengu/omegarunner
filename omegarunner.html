@@ -95,8 +95,11 @@
           <kbd>R</kbd> restart &nbsp;
           <kbd>P</kbd> pause
           <div style="margin-top:6px">
-            Hop the <b style="color:#1f7a3a">ice holes</b>; switch lanes to dodge the
-            <b style="color:#2e7fb8">ice blocks</b>; grab the <b style="color:#e0a700">gold flags</b>.
+            <b>60 seconds</b> on the clock — grab as many <b style="color:#e0a700">gold flags</b>
+            and as much <b style="color:#2e7fb8">distance</b> as you can.
+            Hop the <b style="color:#1f7a3a">ice holes</b> and switch lanes around the
+            <b style="color:#2e7fb8">ice blocks</b> — hitting one doesn't end the run, it
+            <b style="color:#1769b0">freezes you for a second</b> (and the clock keeps ticking!).
           </div>
         </div>
       </div>
@@ -134,6 +137,11 @@ const CONFIG = {
   spawnGapMax: 40,      // max ticks between spawn attempts
   hardRowExtraGap: 12,  // extra spacing after a hard (blocking) row
   coinValue: 10,
+  // --- Timed-run rules ---
+  ticksPerSecond: 60,   // logic ticks per real second (matches tickMs)
+  runSeconds: 60,       // each run lasts this many seconds (the only end condition)
+  freezeSeconds: 1.0,   // TUNABLE: how long a collision freezes the runner
+  distanceScore: 1,     // points per distance unit in the final score
   // An entity's "z" is its position along the track: 1.0 = far horizon,
   // 0.0 = at the player's feet. It decreases each tick as it approaches.
   zStart: 1.0,
@@ -164,6 +172,10 @@ function newGame() {
     laneFrom: 1,             // for visual interpolation
     laneAnim: 0,             // ticks remaining in lane slide
     jumpT: 0,                // ticks remaining in current jump (0 = grounded)
+    // timed-run state
+    timeLeftTicks: CONFIG.runSeconds * CONFIG.ticksPerSecond, // 60s countdown
+    freezeT: 0,              // ticks remaining frozen from a collision (0 = free)
+    finalScore: 0,           // computed when the timer runs out
     // world
     entities: [],            // {id, kind, lane, z}
     nextId: 1,
@@ -261,8 +273,29 @@ function isAirborne(g) {
 }
 
 // ---- Simulation step -----------------------------------------------------
+// Rules: a run lasts CONFIG.runSeconds. The clock is the ONLY end condition.
+// Hitting an obstacle no longer ends the run — it freezes the runner for
+// CONFIG.freezeSeconds (the world pauses but the clock keeps ticking, so
+// obstacles cost you time). Goal: maximize coins + distance before time is up.
 function step(g, action) {
   if (!g.running || g.paused || g.over) return;
+
+  // Run countdown — always ticks, even while frozen.
+  g.timeLeftTicks--;
+  if (g.timeLeftTicks <= 0) {
+    g.timeLeftTicks = 0;
+    endRun(g);
+    return;
+  }
+
+  // Frozen by a recent collision: the runner can't advance. The world is
+  // paused (nothing approaches, no spawns, no scoring) — only the clock runs.
+  if (g.freezeT > 0) {
+    g.freezeT--;
+    g.tick++;
+    g.lastState = encodeState(g);
+    return;
+  }
 
   applyAction(g, action);
 
@@ -294,13 +327,13 @@ function step(g, action) {
         if (isAirborne(g)) {
           e.resolved = true; // jumped over it
         } else {
-          endGame(g, e);
-          return;
+          startFreeze(g, e); // bumped a hole -> freeze penalty (no game over)
+          break;
         }
       } else if (e.kind === KINDS.BARRIER) {
-        // Tall barrier: jumping does not help.
-        endGame(g, e);
-        return;
+        // Tall barrier: jumping does not help -> freeze penalty.
+        startFreeze(g, e);
+        break;
       }
     }
   }
@@ -310,17 +343,29 @@ function step(g, action) {
 
   trySpawn(g);
 
-  // Survival scoring.
+  // Survival scoring (kept for the encoded state; final score is coins+dist).
   g.score += 1;
   g.tick++;
 
   g.lastState = encodeState(g);
 }
 
-function endGame(g, byEntity) {
+// Begin a freeze penalty. The offending obstacle is marked resolved so it
+// won't re-trigger when the world resumes.
+function startFreeze(g, byEntity) {
+  if (g.freezeT > 0) return; // already frozen
+  g.freezeT = Math.round(CONFIG.freezeSeconds * CONFIG.ticksPerSecond);
+  g.lastFreezeBy = byEntity ? byEntity.kind : 'obstacle';
+  if (byEntity) byEntity.resolved = true;
+}
+
+// End the run when the clock hits zero. Final score = coins + distance.
+function endRun(g) {
   g.over = true;
   g.running = false;
-  g.deathBy = byEntity ? byEntity.kind : 'obstacle';
+  g.endedBy = 'time';
+  g.finalScore = g.coins * CONFIG.coinValue
+    + Math.round(g.distance) * CONFIG.distanceScore;
   g.lastState = encodeState(g);
 }
 
@@ -412,6 +457,8 @@ const fx = {
   prevCoins: 0,
   prevJumpT: 0,
   prevOver: false,
+  prevFreeze: 0,      // previous freeze timer (to detect a fresh collision)
+  freezeFlash: 0,     // cold blue flash while frozen
   shake: 0,           // screen-shake magnitude (px), decays
   land: 0,            // landing squash timer 0..1
   flash: 0,           // white flash on big events
@@ -423,6 +470,7 @@ function resetFx() {
   fx.runPhase = 0; fx.bgScroll = 0; fx.particles.length = 0; fx.screenPos.clear();
   fx.prevCoins = 0; fx.prevJumpT = 0; fx.prevOver = false; fx.shake = 0;
   fx.land = 0; fx.flash = 0; fx.overT = 0; fx.dust = 0; fx.pops.length = 0;
+  fx.prevFreeze = 0; fx.freezeFlash = 0;
 }
 
 function addParticle(p) {
@@ -461,6 +509,9 @@ function updateFx(g, dtf) {
   if (fx.shake < 0.15) fx.shake = 0;
   fx.land = Math.max(0, fx.land - dtf * 0.08);
   fx.flash = Math.max(0, fx.flash - dtf * 0.08);
+  // Freeze flash follows the freeze timer: bright while frozen, fades after.
+  if (g.freezeT > 0) fx.freezeFlash = Math.max(fx.freezeFlash, 0.28);
+  fx.freezeFlash = Math.max(0, fx.freezeFlash - dtf * 0.06);
   if (g.over) fx.overT += dtf;
 
   // Running dust trail while grounded.
@@ -523,16 +574,27 @@ function detectEvents(g) {
   }
   fx.prevJumpT = g.jumpT;
 
-  // Game over: big crash burst + heavy shake + flash.
+  // Collision freeze just started: cold flash + shake + ice burst + "SLIP!".
+  if (g.freezeT > 0 && fx.prevFreeze === 0) {
+    const px = laneCenterX(playerLaneFloat(g), CONFIG.zPlayer);
+    const py = depthY(CONFIG.zPlayer) - 40;
+    const cols = g.lastFreezeBy === KINDS.BARRIER
+      ? ['#a6dbff', '#eaf8ff', '#ffffff', '#6db4e6']   // ice-block bonk
+      : ['#bfe6ff', '#1f4e7a', '#ffffff', '#9fd0f0'];  // hole splash
+    burst(px, py, 26, cols, { spd: 5.5, life: 32, size: 6, up: 2.5, grav: 0.2 });
+    burst(px, py, 12, ['#ffffff'], { spd: 7, life: 14, size: 4, grav: 0 });
+    fx.shake = 12; fx.freezeFlash = 0.6;
+    fx.pops.push({ x: px, y: py - 10, t: 0, max: 32, text: 'SLIP!', color: '#7fdfff' });
+  }
+  fx.prevFreeze = g.freezeT;
+
+  // Time up: a gentle gold celebration of the finished run.
   if (g.over && !fx.prevOver) {
     const px = laneCenterX(playerLaneFloat(g), CONFIG.zPlayer);
     const py = depthY(CONFIG.zPlayer) - 50;
-    const cols = g.deathBy === KINDS.BARRIER
-      ? ['#a6dbff', '#eaf8ff', '#ffffff', '#6db4e6']   // shattered ice
-      : ['#bfe6ff', '#1f4e7a', '#ffffff', '#9fd0f0'];  // splash from the hole
-    burst(px, py, 40, cols, { spd: 6.5, life: 44, size: 7, up: 3, grav: 0.22 });
-    burst(px, py, 20, ['#ffffff'], { spd: 8, life: 18, size: 4, grav: 0 });
-    fx.shake = 16; fx.flash = 0.7;
+    burst(px, py, 30, ['#ffd23d', '#ffe680', '#ffffff', '#fff3b0'],
+      { spd: 5.5, life: 50, size: 6, up: 3.5, grav: 0.16, shape: 'spark' });
+    fx.shake = 8; fx.flash = 0.4;
   }
   fx.prevOver = g.over;
 }
@@ -571,6 +633,16 @@ function draw(g) {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, CONFIG.canvasW, CONFIG.canvasH);
     ctx.restore();
+  }
+
+  // Cold frost overlay while the runner is frozen.
+  if (fx.freezeFlash > 0.01 || g.freezeT > 0) {
+    ctx.save();
+    ctx.globalAlpha = Math.min(0.45, fx.freezeFlash);
+    ctx.fillStyle = '#bfe6ff';
+    ctx.fillRect(0, 0, CONFIG.canvasW, CONFIG.canvasH);
+    ctx.restore();
+    if (g.freezeT > 0) drawFrozenBanner(g);
   }
 
   // Overlays.
@@ -856,6 +928,7 @@ function drawPlayer(g) {
   const liftN = jumpLift(g);
   const lift = liftN * 135;
   const air = g.jumpT > 0;
+  const frozen = g.freezeT > 0;
 
   // Round shadow, shrinks + fades as the penguin hops.
   ctx.save();
@@ -866,7 +939,7 @@ function drawPlayer(g) {
   ctx.fill();
   ctx.restore();
 
-  // Hop squash & stretch + waddle rock.
+  // Hop squash & stretch + waddle rock (animation pauses while frozen).
   let sx = 1, sy = 1;
   if (air) {
     const vel = Math.cos(Math.PI * (1 - g.jumpT / CONFIG.jumpTicks));
@@ -874,29 +947,34 @@ function drawPlayer(g) {
   }
   if (fx.land > 0) { sy *= 1 - 0.30 * fx.land; sx *= 1 + 0.26 * fx.land; }
   const run = fx.runPhase;
-  const bob = air ? 0 : Math.abs(Math.sin(run)) * 4 * s;
-  const rock = air ? 0 : Math.sin(run) * 0.10; // side-to-side waddle
+  const bob = (air || frozen) ? 0 : Math.abs(Math.sin(run)) * 4 * s;
+  const rock = (air || frozen) ? 0 : Math.sin(run) * 0.10; // side-to-side waddle
+  const shiver = frozen ? (Math.random() - 0.5) * 3 * s : 0; // brrr!
 
   ctx.save();
-  ctx.translate(x, baseY - lift - bob);
+  ctx.translate(x + shiver, baseY - lift - bob);
   ctx.rotate(rock);
   ctx.scale(sx, sy);
   ctx.scale(s, s);
-  drawPenguin(g, run, air);
+  drawPenguin(g, run, air, frozen);
   ctx.restore();
 }
 
 // Penguin in local space: feet at y=0, body up in -y. Flat retro colors.
-function drawPenguin(g, run, air) {
-  const BLACK = '#23303a', BELLY = '#ffffff', ORANGE = '#ff9f1c', ORANGE_D = '#e07d05';
-  const step = air ? 0 : Math.sin(run);
+function drawPenguin(g, run, air, frozen) {
+  const BLACK = frozen ? '#4a5e82' : '#23303a';
+  const BELLY = frozen ? '#dff1ff' : '#ffffff';
+  const ORANGE = frozen ? '#9fb8d8' : '#ff9f1c';
+  const ORANGE_D = frozen ? '#7e9bc0' : '#e07d05';
+  const step = (air || frozen) ? 0 : Math.sin(run);
 
   // Feet (orange) — alternate when waddling, tuck up a touch when airborne.
   const fy = air ? -8 : 0;
   ctx.fillStyle = ORANGE;
   for (const side of [-1, 1]) {
     const fx2 = side * 7 + (air ? 0 : step * side * 3);
-    const fup = air ? 4 : Math.max(0, Math.sin(run + (side > 0 ? 0 : Math.PI))) * 3;
+    const fup = (air || frozen) ? (air ? 4 : 0)
+      : Math.max(0, Math.sin(run + (side > 0 ? 0 : Math.PI))) * 3;
     ctx.beginPath();
     ctx.ellipse(fx2, fy - fup, 7, 4, 0, 0, Math.PI * 2); ctx.fill();
   }
@@ -911,10 +989,10 @@ function drawPenguin(g, run, air) {
   ctx.beginPath();
   ctx.ellipse(0, bodyCY + 2, 11, 17, 0, 0, Math.PI * 2); ctx.fill();
 
-  // Flippers (black) — swing a little; raise when airborne.
+  // Flippers (black) — swing a little; raise when airborne; stiff when frozen.
   ctx.fillStyle = BLACK;
   for (const side of [-1, 1]) {
-    const sw = air ? -0.9 : Math.sin(run + (side > 0 ? Math.PI : 0)) * 0.5;
+    const sw = frozen ? 0.2 : (air ? -0.9 : Math.sin(run + (side > 0 ? Math.PI : 0)) * 0.5);
     ctx.save();
     ctx.translate(side * 16, bodyCY - 2);
     ctx.rotate(side * (0.5 + sw));
@@ -949,12 +1027,33 @@ function drawPenguin(g, run, air) {
   ctx.beginPath(); ctx.arc(-7.5, headCY + 3, 2, 0, Math.PI * 2); ctx.fill();
   ctx.beginPath(); ctx.arc(7.5, headCY + 3, 2, 0, Math.PI * 2); ctx.fill();
 
-  // Tiny "wheee" sparkles when hopping.
-  if (air) {
+  // Tiny "wheee" sparkles when hopping (not while frozen).
+  if (air && !frozen) {
     ctx.fillStyle = 'rgba(255,255,255,0.8)';
     ctx.fillRect(-22, headCY - 6, 3, 3);
     ctx.fillRect(20, headCY + 2, 3, 3);
   }
+  // Ice crystals cling to a frozen penguin.
+  if (frozen) {
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.fillRect(-12, bodyCY - 6, 3, 3);
+    ctx.fillRect(9, bodyCY + 4, 3, 3);
+    ctx.fillRect(-3, headCY - 12, 3, 3);
+    ctx.strokeStyle = 'rgba(180,225,255,0.9)'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(-17, bodyCY - 22, 34, 44);
+  }
+}
+
+// "FROZEN!" banner shown while the freeze penalty is active.
+function drawFrozenBanner(g) {
+  const W = CONFIG.canvasW;
+  const secs = (g.freezeT / CONFIG.ticksPerSecond);
+  const txt = 'FROZEN';
+  const sc = 4;
+  const w = pixelTextWidth(txt, sc);
+  const y = Math.round(CONFIG.canvasH * 0.30);
+  drawPixelText(txt, (W - w) / 2, y, sc, '#1769b0');
+  drawPixelText(txt, (W - w) / 2 - 2, y - 2, sc, '#dff1ff');
 }
 
 // ---- Particles & pops (flat, retro) --------------------------------------
@@ -1084,11 +1183,17 @@ function drawHUD(g) {
   ctx.fillStyle = '#2e5891';
   ctx.fillRect(0, 0, W, 2);
 
-  const sec = Math.floor(g.tick / 60);
-  const time = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+  // Time remaining (countdown). Flashes red in the final 10 seconds.
+  const secsLeft = Math.ceil(g.timeLeftTicks / CONFIG.ticksPerSecond);
+  const mm = Math.floor(secsLeft / 60), ss = secsLeft % 60;
+  const timeStr = `${mm}:${String(ss).padStart(2, '0')}`;
+  const low = secsLeft <= 10 && !g.over;
+  const blinkOn = (Math.floor(fx.runPhase * 3) % 2) === 0;
+  const timeCol = low ? (blinkOn ? '#ff5d6c' : '#ffd23d') : '#9fe0ff';
+
   const fields = [
-    ['SCORE', String(g.score).padStart(5, '0'), '#ffe14d'],
-    ['TIME', time, '#9fe0ff'],
+    ['TIME', timeStr, timeCol],
+    ['COINS', String(g.coins).padStart(3, '0'), '#ffe14d'],
     ['DIST', String(Math.round(g.distance)).padStart(4, '0') + 'M', '#9fffb0'],
     ['SPD', g.speedMult.toFixed(1) + 'X', '#ffb0d0'],
   ];
@@ -1099,13 +1204,13 @@ function drawHUD(g) {
     drawPixelText(label, baseX, 5, 1, '#7fa8d8');
     drawPixelText(val, baseX, 14, 2, col);
   }
-  // coin tally on the far right corner of the score field
-  const cx = Math.round(colW - 22);
+  // small flag icon next to the COINS field
+  const fxi = Math.round(colW + 8 + pixelTextWidth('000', 2) + 4);
   ctx.fillStyle = '#ffcf2e';
-  ctx.fillRect(cx, 6, 6, 8);
-  ctx.fillStyle = '#e0a700';
-  ctx.fillRect(cx, 6, 6, 2);
-  drawPixelText(String(g.coins), cx + 9, 6, 1, '#ffe14d');
+  ctx.beginPath();
+  ctx.moveTo(fxi, 13); ctx.lineTo(fxi + 8, 16); ctx.lineTo(fxi, 19); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#9fb3c4';
+  ctx.fillRect(fxi - 1, 13, 1.5, 10);
 }
 
 function drawCenterText(text, color) {
@@ -1132,19 +1237,31 @@ function drawGameOver(g) {
 
   // Title with a tiny retro bob.
   const sc = 5 + Math.round(Math.sin(fx.overT * 0.12) * 0.5);
-  const title = 'GAME OVER';
-  drawPixelText(title, (W - pixelTextWidth(title, sc)) / 2, H / 2 - 90, sc, '#ff5d6c');
+  const title = "TIME UP!";
+  drawPixelText(title, (W - pixelTextWidth(title, sc)) / 2, H / 2 - 100, sc, '#ffd23d');
 
   if (t > 0.5) {
-    const what = g.deathBy === KINDS.BARRIER ? 'HIT AN ICE BLOCK'
-               : g.deathBy === KINDS.GROUND ? 'FELL IN A HOLE' : 'WIPED OUT';
-    drawPixelText(what, (W - pixelTextWidth(what, 2)) / 2, H / 2 - 30, 2, '#ffe14d');
-    const line = `SCORE ${g.score}  FLAGS ${g.coins}  ${Math.round(g.distance)}M`;
-    drawPixelText(line, (W - pixelTextWidth(line, 2)) / 2, H / 2 + 6, 2, '#ffffff');
+    // Final score = coins + distance, shown as a breakdown.
+    const coinPts = g.coins * CONFIG.coinValue;
+    const distPts = Math.round(g.distance) * CONFIG.distanceScore;
+    const rows = [
+      [`COINS  ${String(g.coins).padStart(3, ' ')}  X${CONFIG.coinValue}  =  ${coinPts}`, '#ffe14d'],
+      [`DISTANCE  ${Math.round(g.distance)}M  =  ${distPts}`, '#9fffb0'],
+    ];
+    for (let i = 0; i < rows.length; i++) {
+      const [line, col] = rows[i];
+      drawPixelText(line, (W - pixelTextWidth(line, 2)) / 2, H / 2 - 36 + i * 22, 2, col);
+    }
+    // separator + total
+    ctx.fillStyle = '#2e5891';
+    ctx.fillRect(W / 2 - 150, H / 2 + 6, 300, 2);
+    const total = `SCORE  ${g.finalScore}`;
+    drawPixelText(total, (W - pixelTextWidth(total, 3)) / 2, H / 2 + 16, 3, '#ffffff');
+
     const blink = (Math.floor(fx.overT / 18) % 2) === 0;
     if (blink) {
       const pr = 'PRESS R TO RUN AGAIN';
-      drawPixelText(pr, (W - pixelTextWidth(pr, 2)) / 2, H / 2 + 50, 2, '#9fe0ff');
+      drawPixelText(pr, (W - pixelTextWidth(pr, 2)) / 2, H / 2 + 64, 2, '#9fe0ff');
     }
   }
 }
