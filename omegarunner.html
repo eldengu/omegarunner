@@ -122,6 +122,41 @@
     font-family: "Cascadia Code","Consolas",monospace; font-size: 11px; color: #45617a;
     background: #f6fbff; border: 1px solid #dcebf8; border-radius: 5px; padding: 6px 8px;
   }
+  /* Comparison panel */
+  #cmp-budget { width: 80px; }
+  #cmp-start {
+    align-self: center; padding: 6px 14px; border-radius: 6px; border: 2px solid #1769b0;
+    background: #1769b0; color: #fff; font-weight: 700; cursor: pointer; font-size: 13px;
+  }
+  #cmp-start.on { background: #c0392b; border-color: #c0392b; }
+  .cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 4px; }
+  .cmp-side { border: 1px solid #dcebf8; border-radius: 8px; padding: 10px; background: #f7fbff; }
+  .cmp-head { font-weight: 700; font-size: 13px; color: #10233f; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  .cmp-tag { font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 10px; }
+  .cmp-tag.seq { background: #ffe0d6; color: #b5482a; }
+  .cmp-tag.par { background: #d6f5dd; color: #1f7a3a; }
+  #cmp-canvas-L, #cmp-canvas-R {
+    width: 100%; height: auto; display: block; border-radius: 6px;
+    border: 2px solid #10233f; background: #a9e0ff; image-rendering: pixelated;
+  }
+  .cmp-stats {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px 10px; margin: 8px 0 6px;
+    font-size: 11px; color: #4a7aa0;
+  }
+  .cmp-stats div { display: flex; flex-direction: column; }
+  .cmp-stats b { font-size: 16px; color: #10233f; font-variant-numeric: tabular-nums; }
+  .cmp-stats .cmp-score b { color: #1769b0; }
+  .cmp-mods { display: flex; flex-direction: column; gap: 4px; }
+  .cmod {
+    display: grid; grid-template-columns: 74px 52px 1fr 18px; align-items: center; gap: 8px;
+    font-size: 11px; padding: 3px 6px; border-radius: 5px; background: #eef6fd; border: 1px solid #e0ecf6;
+  }
+  .cmod.win { background: #fff7d6; border-color: #ffd23d; }
+  .cmod.skipped { opacity: 0.4; }
+  .cmod .cmname { font-weight: 700; color: #10233f; }
+  .cmod .cmact { font-family: monospace; font-weight: 700; color: #1769b0; text-align: center; }
+  .cmmatch { text-align: center; font-weight: 700; }
+  .cmmatch.ok { color: #1f7a3a; } .cmmatch.no { color: #c0392b; } .cmmatch.na { color: #9bb0c4; }
 </style>
 </head>
 <body>
@@ -180,6 +215,60 @@
       </div>
     </div>
   </div>
+
+  <!-- ============ Sequential vs Parallel comparison (same model/seed) ======= -->
+  <div class="row" style="margin-top:4px">
+    <div class="col" style="flex:0 0 100%">
+      <div class="panel" id="cmp">
+        <h2>Sequential vs Parallel — same model, same modules, same seed
+          <span id="cmp-status" class="mstat midle">idle</span>
+        </h2>
+        <div class="mconn">
+          <button id="cmp-start" type="button">Start Comparison</button>
+          <label>LEFT time budget (ms)
+            <input id="cmp-budget" type="number" min="50" step="50" value="350"></label>
+          <span class="hint">Uses the Base URL / model / API key from the panel above.
+            Both sides run the identical 60s seeded game; only the evaluation strategy differs.</span>
+        </div>
+        <div class="cmp-grid">
+          <div class="cmp-side">
+            <div class="cmp-head">LEFT — SEQUENTIAL <span class="cmp-tag seq">budgeted</span></div>
+            <canvas id="cmp-canvas-L" width="300" height="170"></canvas>
+            <div class="cmp-stats">
+              <div><span>modules eval'd</span><b id="cmp-eval-L">—</b></div>
+              <div><span>tokens/sec</span><b id="cmp-tps-L">—</b></div>
+              <div><span>coins</span><b id="cmp-coins-L">0</b></div>
+              <div><span>distance</span><b id="cmp-dist-L">0m</b></div>
+              <div><span>freezes</span><b id="cmp-frz-L">0</b></div>
+              <div><span>time</span><b id="cmp-time-L">60s</b></div>
+              <div class="cmp-score"><span>score</span><b id="cmp-score-L">0</b></div>
+            </div>
+            <div class="cmp-mods" id="cmp-mods-L"></div>
+          </div>
+          <div class="cmp-side">
+            <div class="cmp-head">RIGHT — PARALLEL <span class="cmp-tag par">Promise.all</span></div>
+            <canvas id="cmp-canvas-R" width="300" height="170"></canvas>
+            <div class="cmp-stats">
+              <div><span>modules eval'd</span><b id="cmp-eval-R">—</b></div>
+              <div><span>tokens/sec</span><b id="cmp-tps-R">—</b></div>
+              <div><span>coins</span><b id="cmp-coins-R">0</b></div>
+              <div><span>distance</span><b id="cmp-dist-R">0m</b></div>
+              <div><span>freezes</span><b id="cmp-frz-R">0</b></div>
+              <div><span>time</span><b id="cmp-time-R">60s</b></div>
+              <div class="cmp-score"><span>score</span><b id="cmp-score-R">0</b></div>
+            </div>
+            <div class="cmp-mods" id="cmp-mods-R"></div>
+          </div>
+        </div>
+        <div class="hint" style="margin-top:6px">
+          The story: the sequential side often can't evaluate all 3 experts within its
+          time budget, so it decides on partial information — it dodges worse, freezes more,
+          and scores lower. Same model; Cerebras-speed parallelism is what lets the full
+          committee vote every tick.
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 <script>
 "use strict";
@@ -226,8 +315,23 @@ const KINDS = { GROUND: 'ground', BARRIER: 'barrier', COIN: 'coin' };
 // ---- Game state ----------------------------------------------------------
 let game;
 
-function newGame() {
+// Seeded PRNG (mulberry32) so two game instances can share an identical
+// obstacle/coin stream. Passing no seed keeps each run effectively random.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function newGame(seed) {
+  const s = (seed == null) ? ((Math.random() * 0x100000000) >>> 0) : (seed >>> 0);
   return {
+    seed: s,
+    rng: mulberry32(s),  // all spawn randomness draws from here
     tick: 0,
     running: true,
     paused: false,
@@ -255,40 +359,42 @@ function newGame() {
 }
 
 // ---- Spawning ------------------------------------------------------------
-// Deterministic-ish RNG seam left simple (Math.random) for now.
-function rint(a, b) { return a + Math.floor(Math.random() * (b - a + 1)); }
+// All randomness draws from the game's seeded rng so two instances with the
+// same seed produce an identical obstacle/coin stream.
+function rint(rng, a, b) { return a + Math.floor(rng() * (b - a + 1)); }
 
 function trySpawn(g) {
+  const rng = g.rng;
   g.spawnCountdown--;
   if (g.spawnCountdown > 0) return;
-  g.spawnCountdown = rint(CONFIG.spawnGapMin, CONFIG.spawnGapMax);
+  g.spawnCountdown = rint(rng, CONFIG.spawnGapMin, CONFIG.spawnGapMax);
 
   // Difficulty pacing: a "hard" row blocks two or three lanes and demands a
   // precise response (dodge or jump). Never place two hard rows back-to-back —
   // always give an easy/coin breather between them, and space them further
   // apart in time, so any sequence stays survivable for a human.
   const allowHard = !g.lastRowHard;
-  const roll = Math.random();
+  const roll = rng();
   let hard = false;
 
   if (roll < 0.42) {
     // Easy: single obstacle in one lane (+ maybe a coin elsewhere).
-    const lane = rint(0, CONFIG.lanes - 1);
-    const kind = Math.random() < 0.5 ? KINDS.GROUND : KINDS.BARRIER;
+    const lane = rint(rng, 0, CONFIG.lanes - 1);
+    const kind = rng() < 0.5 ? KINDS.GROUND : KINDS.BARRIER;
     g.entities.push(makeEntity(g, kind, lane));
-    if (Math.random() < 0.5) {
-      g.entities.push(makeEntity(g, KINDS.COIN, pickOtherLane(lane)));
+    if (rng() < 0.5) {
+      g.entities.push(makeEntity(g, KINDS.COIN, pickOtherLane(rng, lane)));
     }
   } else if (roll < 0.68 && allowHard) {
     // Hard: two lanes blocked, one clear lane (force a lane choice).
     hard = true;
-    const clear = rint(0, CONFIG.lanes - 1);
+    const clear = rint(rng, 0, CONFIG.lanes - 1);
     for (let l = 0; l < CONFIG.lanes; l++) {
       if (l === clear) continue;
-      const kind = Math.random() < 0.5 ? KINDS.GROUND : KINDS.BARRIER;
+      const kind = rng() < 0.5 ? KINDS.GROUND : KINDS.BARRIER;
       g.entities.push(makeEntity(g, kind, l));
     }
-    if (Math.random() < 0.6) g.entities.push(makeEntity(g, KINDS.COIN, clear));
+    if (rng() < 0.6) g.entities.push(makeEntity(g, KINDS.COIN, clear));
   } else if (roll < 0.80 && allowHard) {
     // Hard: a full row of GROUND obstacles -> must jump (all lanes covered).
     hard = true;
@@ -297,7 +403,7 @@ function trySpawn(g) {
     }
   } else {
     // Coins only — a little line of them in one lane (a breather).
-    g.entities.push(makeEntity(g, KINDS.COIN, rint(0, CONFIG.lanes - 1)));
+    g.entities.push(makeEntity(g, KINDS.COIN, rint(rng, 0, CONFIG.lanes - 1)));
   }
 
   if (hard) g.spawnCountdown += CONFIG.hardRowExtraGap;
@@ -308,9 +414,9 @@ function makeEntity(g, kind, lane) {
   return { id: g.nextId++, kind, lane, z: CONFIG.zStart };
 }
 
-function pickOtherLane(lane) {
+function pickOtherLane(rng, lane) {
   let l;
-  do { l = rint(0, CONFIG.lanes - 1); } while (l === lane);
+  do { l = rint(rng, 0, CONFIG.lanes - 1); } while (l === lane);
   return l;
 }
 
@@ -1424,9 +1530,12 @@ const mosaic = {
 };
 
 // --- LLM call (OpenAI-compatible chat completions). Swappable for tests. ---
+// Returns { content, usage, timeInfo }. usage = OpenAI token usage;
+// timeInfo = Cerebras `time_info` block (used for tokens/sec).
 async function mosaicChat(base, key, model, system, user) {
   if (typeof window !== 'undefined' && window.__mosaicChat) {
-    return window.__mosaicChat({ base, key, model, system, user });
+    const r = await window.__mosaicChat({ base, key, model, system, user });
+    return (typeof r === 'string') ? { content: r } : r;
   }
   const url = base.replace(/\/+$/, '') + '/chat/completions';
   const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
@@ -1441,8 +1550,19 @@ async function mosaicChat(base, key, model, system, user) {
   if (!res.ok && (res.status === 400 || res.status === 422)) res = await post(base_body);
   if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 160));
   const data = await res.json();
-  return data.choices && data.choices[0] && data.choices[0].message
+  const content = data.choices && data.choices[0] && data.choices[0].message
     ? (data.choices[0].message.content || '') : '';
+  return { content, usage: data.usage, timeInfo: data.time_info };
+}
+
+// tokens/sec from Cerebras time_info if present, else from latency.
+function tokPerSec(usage, timeInfo, latencyMs) {
+  const toks = (usage && (usage.completion_tokens || usage.total_tokens)) || 0;
+  let secs = 0;
+  if (timeInfo && timeInfo.completion_time) secs = timeInfo.completion_time;
+  else if (timeInfo && timeInfo.total_time) secs = timeInfo.total_time;
+  else if (latencyMs) secs = latencyMs / 1000;
+  return secs > 0 ? toks / secs : 0;
 }
 
 const ACTIONS = ['left', 'right', 'jump', 'stay'];
@@ -1464,21 +1584,25 @@ function parseModuleReply(text) {
   };
 }
 
-async function callModule(m, conn, stateText) {
+async function callModule(m, conn, stateText, onErr) {
   const system = PERSONA_CORE + '\n' + m.bias;
   const user = 'Current state:\n' + stateText + '\n\nYour action + prediction as JSON:';
   const t0 = nowMs();
   try {
-    const reply = await mosaicChat(conn.base, conn.key, conn.model, system, user);
-    const p = parseModuleReply(reply);
+    const { content, usage, timeInfo } = await mosaicChat(conn.base, conn.key, conn.model, system, user);
     m.latency = Math.round(nowMs() - t0);
+    m.compTokens = (usage && (usage.completion_tokens || usage.total_tokens)) || 0;
+    m.compTime = (timeInfo && (timeInfo.completion_time || timeInfo.total_time)) || (m.latency / 1000);
+    m.tokps = tokPerSec(usage, timeInfo, m.latency);
+    const p = parseModuleReply(content);
     if (!p) { m.ok = false; m.action = 'stay'; m.pred = { action: 'stay', coin: 0, freeze: false, note: '(parse fail)' }; return; }
     m.ok = true; m.action = p.action; m.pred = p;
   } catch (err) {
     m.latency = Math.round(nowMs() - t0);
     m.ok = false; m.action = 'stay';
     m.pred = { action: 'stay', coin: 0, freeze: false, note: '(error)' };
-    mosaic.lastError = String(err.message || err).slice(0, 160);
+    m.tokps = 0; m.compTokens = 0; m.compTime = 0;
+    if (onErr) onErr(err); else mosaic.lastError = String(err.message || err).slice(0, 160);
   }
 }
 function nowMs() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
@@ -1664,12 +1788,331 @@ if (typeof document !== 'undefined') {
     } catch (e) {}
     document.getElementById('m-start').addEventListener('click', () =>
       mosaic.enabled ? stopMosaic() : startMosaic());
+
+    // Comparison mode wiring.
+    const budgetEl = document.getElementById('cmp-budget');
+    const syncBudget = () => { const v = parseInt(budgetEl.value, 10); if (v > 0) CMP.budgetMs = v; };
+    if (budgetEl) budgetEl.addEventListener('change', syncBudget);
+    const cmpBtn = document.getElementById('cmp-start');
+    if (cmpBtn) cmpBtn.addEventListener('click', () => {
+      if (cmp.active) { stopComparison(); }
+      else { syncBudget(); startComparison(); }
+    });
   });
+}
+
+/* =========================================================================
+   SIDE-BY-SIDE COMPARISON MODE
+
+   Two instances of the SAME MOSAIC controller (same model, same 3 modules)
+   on the SAME seeded 60-second game, differing ONLY in how the modules are
+   evaluated each decision:
+     LEFT  (sequential): call modules one-by-one under a per-decision time
+           BUDGET. If the budget runs out, decide on only the modules that
+           finished — partial information.
+     RIGHT (parallel): Promise.all, so all 3 finish within one round-trip.
+
+   Same model + same seed => the only variable is evaluation strategy. The
+   parallel side gets the full committee every decision and should dodge more,
+   freeze less, and end with more coins + distance.
+   ========================================================================= */
+const CMP = {
+  budgetMs: 350,      // LEFT per-decision wall-clock budget (tunable)
+  settleTicks: MCFG.settleTicks,
+  beta: MCFG.beta,
+  respFloor: MCFG.respFloor,
+  minDecisionMs: 30,
+};
+
+function makeModuleSet() {
+  return MODULE_DEFS.map(d => ({
+    ...d, resp: 1 / MODULE_DEFS.length,
+    action: 'stay', pred: null, matched: null, err: null, latency: 0, ok: true,
+    tokps: 0, compTokens: 0, compTime: 0,
+  }));
+}
+
+const cmp = {
+  active: false,
+  seed: 0,
+  gameL: null, gameR: null,
+  ctxL: null, ctxR: null,
+  ctrlL: null, ctrlR: null,
+};
+
+function makeController(side, mode) {
+  return {
+    side, mode,                 // 'L'/'R', 'seq'/'par'
+    modules: makeModuleSet(),
+    pendingAction: 'stay',
+    running: false,
+    decisions: 0,
+    evaluatedThisTick: 0,
+    aggTokps: 0,
+    freezes: 0,
+    prevFreeze: false,
+    lastAction: 'stay',
+    evaluatedIds: new Set(),
+  };
+}
+
+// Score only the modules actually evaluated this decision; renormalize over
+// the full set so weight still sums to 1 (un-evaluated modules keep weight).
+function scoreSubset(allModules, evaluated, actual, cfg) {
+  const evalSet = new Set(evaluated);
+  for (const m of allModules) {
+    if (!evalSet.has(m)) { m.matched = null; continue; }
+    const p = m.pred || { coin: 0, freeze: false };
+    let err = 0;
+    if ((p.coin > 0) !== (actual.coinGain > 0)) err++;
+    if (!!p.freeze !== !!actual.freeze) err++;
+    if (m.ok === false) err = Math.max(err, 1);
+    m.err = err; m.matched = err === 0;
+    m.resp *= Math.exp(-cfg.beta * err);
+  }
+  let sum = 0;
+  for (const m of allModules) { if (m.resp < cfg.respFloor) m.resp = cfg.respFloor; sum += m.resp; }
+  if (sum > 0) for (const m of allModules) m.resp /= sum;
+}
+
+// LEFT: sequential evaluation under a wall-clock budget.
+async function evalSequential(modules, conn, stateText, budgetMs) {
+  const deadline = nowMs() + budgetMs;
+  const evaluated = [];
+  for (const m of modules) {
+    const remaining = deadline - nowMs();
+    if (remaining <= 0) break;                 // out of budget -> act on what we have
+    const timeout = new Promise(res => setTimeout(() => res('__timeout__'), remaining));
+    const done = callModule(m, conn, stateText, () => {}).then(() => '__done__');
+    const who = await Promise.race([done, timeout]);
+    if (who === '__timeout__') break;          // call still running when budget hit
+    evaluated.push(m);
+  }
+  return evaluated;
+}
+
+// RIGHT: parallel evaluation — all modules within one round-trip.
+async function evalParallel(modules, conn, stateText) {
+  await Promise.all(modules.map(m => callModule(m, conn, stateText, () => {})));
+  return modules.filter(m => m.ok !== false);
+}
+
+async function controllerLoop(ctrl, getGame) {
+  const conn = readConn();
+  ctrl.running = true;
+  while (cmp.active) {
+    const g = getGame();
+    if (!g || g.over) break;
+    if (g.paused) { await sleep(120); continue; }
+
+    const before = { coins: g.coins, tick: g.tick, frozen: g.freezeT > 0 };
+    const stateText = g.lastState || encodeState(g);
+
+    // Evaluate modules per this controller's strategy.
+    const evaluated = ctrl.mode === 'seq'
+      ? await evalSequential(ctrl.modules, conn, stateText, CMP.budgetMs)
+      : await evalParallel(ctrl.modules, conn, stateText);
+
+    ctrl.evaluatedThisTick = evaluated.length;
+    ctrl.evaluatedIds = new Set(evaluated.map(m => m.id));
+    ctrl.decisions++;
+
+    // Aggregate tokens/sec across the modules evaluated this decision.
+    let toks = 0, time = 0;
+    for (const m of evaluated) { toks += m.compTokens || 0; time += m.compTime || 0; }
+    ctrl.aggTokps = time > 0 ? toks / time : (evaluated.reduce((s, m) => s + (m.tokps || 0), 0) / Math.max(1, evaluated.length));
+
+    // Decision = responsibility-weighted vote over the evaluated subset only.
+    const voters = evaluated.length ? evaluated : [];
+    const { action, winnerIdx } = voters.length
+      ? chooseActionAmong(ctrl.modules, voters)
+      : { action: 'stay', winnerIdx: -1 };
+    ctrl.pendingAction = action;
+    ctrl.lastAction = action;
+    ctrl.winnerIdx = winnerIdx;
+
+    renderCmpSide(ctrl);
+
+    // Settle, then score predictions of the evaluated modules.
+    let sawFreeze = false;
+    const target = g.tick + CMP.settleTicks;
+    while (getGame() === g && g.tick < target && cmp.active && !g.over && !g.paused) {
+      if (!before.frozen && g.freezeT > 0) sawFreeze = true;
+      await sleep(CONFIG.tickMs);
+    }
+    if (!before.frozen && g.freezeT > 0) sawFreeze = true;
+    const actual = { coinGain: g.coins - before.coins, freeze: sawFreeze };
+    scoreSubset(ctrl.modules, evaluated, actual, CMP);
+    renderCmpSide(ctrl);
+    await sleep(CMP.minDecisionMs);
+  }
+  ctrl.running = false;
+}
+
+// chooseAction but restricted to a subset of voters (returns winnerIdx into
+// the FULL module array for highlight).
+function chooseActionAmong(allModules, voters) {
+  const tally = { left: 0, right: 0, jump: 0, stay: 0 };
+  for (const m of voters) tally[m.action] += m.resp;
+  let best = 'stay', bestW = -1;
+  for (const a of ACTIONS) if (tally[a] > bestW) { bestW = tally[a]; best = a; }
+  let winnerIdx = -1, wr = -1;
+  allModules.forEach((m, i) => {
+    if (voters.includes(m) && m.action === best && m.resp > wr) { wr = m.resp; winnerIdx = i; }
+  });
+  return { action: best, winnerIdx };
+}
+
+// Step a comparison game one tick using its controller's buffered action.
+function stepCmpGame(g, ctrl) {
+  if (!g || g.over) return;
+  const a = ctrl.pendingAction; ctrl.pendingAction = 'stay';
+  const wasFrozen = g.freezeT > 0;
+  step(g, a);
+  if (!wasFrozen && g.freezeT > 0) ctrl.freezes++;
+}
+
+function startComparison() {
+  const conn = readConn();
+  if (!conn.key) { setCmpStatus('merr', 'need API key (set it in the panel above)'); return; }
+  if (cmp.active) return;
+  cmp.seed = (Math.random() * 0x100000000) >>> 0;
+  cmp.gameL = newGame(cmp.seed);
+  cmp.gameR = newGame(cmp.seed);
+  cmp.gameL.lastState = encodeState(cmp.gameL);
+  cmp.gameR.lastState = encodeState(cmp.gameR);
+  cmp.ctrlL = makeController('L', 'seq');
+  cmp.ctrlR = makeController('R', 'par');
+  cmp.active = true;
+  buildCmpUI();
+  setCmpStatus('mrun', 'racing — seed ' + cmp.seed.toString(16));
+  document.getElementById('cmp-start').textContent = 'Stop Comparison';
+  document.getElementById('cmp-start').classList.add('on');
+  controllerLoop(cmp.ctrlL, () => cmp.gameL);
+  controllerLoop(cmp.ctrlR, () => cmp.gameR);
+}
+function stopComparison() {
+  cmp.active = false;
+  document.getElementById('cmp-start').textContent = 'Start Comparison';
+  document.getElementById('cmp-start').classList.remove('on');
+  setCmpStatus('midle', 'stopped');
+}
+
+// ---- Comparison UI + mini renderer ---------------------------------------
+function setCmpStatus(cls, text) {
+  const el = document.getElementById('cmp-status');
+  if (el) { el.className = 'mstat ' + cls; el.textContent = text; }
+}
+function buildCmpUI() {
+  cmp.ctxL = document.getElementById('cmp-canvas-L').getContext('2d');
+  cmp.ctxR = document.getElementById('cmp-canvas-R').getContext('2d');
+  buildCmpModules('L', cmp.ctrlL);
+  buildCmpModules('R', cmp.ctrlR);
+}
+function buildCmpModules(side, ctrl) {
+  const host = document.getElementById('cmp-mods-' + side);
+  if (!host) return;
+  host.innerHTML = '';
+  ctrl.modules.forEach((m, i) => {
+    const row = document.createElement('div');
+    row.className = 'cmod'; row.id = 'cmod-' + side + '-' + i;
+    row.innerHTML =
+      '<span class="cmname">' + m.name + '</span>' +
+      '<span class="cmact" id="cmact-' + side + '-' + i + '">·</span>' +
+      '<span class="mbarwrap" style="height:12px"><span class="mbar" id="cmbar-' + side + '-' + i + '"></span></span>' +
+      '<span class="cmmatch na" id="cmmatch-' + side + '-' + i + '">—</span>';
+    host.appendChild(row);
+  });
+}
+function renderCmpSide(ctrl) {
+  const side = ctrl.side;
+  ctrl.modules.forEach((m, i) => {
+    const row = document.getElementById('cmod-' + side + '-' + i);
+    if (!row) return;
+    const evaluated = ctrl.evaluatedIds.has(m.id);
+    row.classList.toggle('win', i === ctrl.winnerIdx);
+    row.classList.toggle('skipped', !evaluated);
+    const act = document.getElementById('cmact-' + side + '-' + i);
+    const bar = document.getElementById('cmbar-' + side + '-' + i);
+    const mt = document.getElementById('cmmatch-' + side + '-' + i);
+    if (act) act.textContent = evaluated ? (ACTION_GLYPH[m.action] || m.action) : 'skip';
+    if (bar) bar.style.width = (m.resp * 100).toFixed(1) + '%';
+    if (mt) {
+      if (!evaluated) { mt.className = 'cmmatch na'; mt.textContent = '–'; }
+      else if (m.matched === null) { mt.className = 'cmmatch na'; mt.textContent = '?'; }
+      else if (m.matched) { mt.className = 'cmmatch ok'; mt.textContent = '✓'; }
+      else { mt.className = 'cmmatch no'; mt.textContent = '✗'; }
+    }
+  });
+}
+function updateCmpStats() {
+  for (const [side, ctrl, g] of [['L', cmp.ctrlL, cmp.gameL], ['R', cmp.ctrlR, cmp.gameR]]) {
+    if (!ctrl || !g) continue;
+    const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+    set('cmp-eval-' + side, ctrl.evaluatedThisTick + ' / ' + ctrl.modules.length);
+    set('cmp-tps-' + side, ctrl.aggTokps ? Math.round(ctrl.aggTokps) : '—');
+    set('cmp-coins-' + side, g.coins);
+    set('cmp-dist-' + side, Math.round(g.distance) + 'm');
+    set('cmp-frz-' + side, ctrl.freezes);
+    const secs = Math.ceil(g.timeLeftTicks / CONFIG.ticksPerSecond);
+    set('cmp-time-' + side, g.over ? 'DONE' : (secs + 's'));
+    set('cmp-score-' + side, g.over ? g.finalScore : (g.coins * CONFIG.coinValue + Math.round(g.distance)));
+  }
+}
+function drawMiniGame(c, g, frozenLabel) {
+  const W = c.canvas.width, H = c.canvas.height;
+  c.clearRect(0, 0, W, H);
+  // sky + snow
+  c.fillStyle = '#a9e0ff'; c.fillRect(0, 0, W, 20);
+  c.fillStyle = '#f4fbff'; c.fillRect(0, 20, W, H - 20);
+  const lanes = CONFIG.lanes, lw = W / lanes, topY = 22, playerY = H - 22;
+  // lane dividers
+  c.strokeStyle = '#cfe6f5'; c.lineWidth = 1;
+  for (let l = 1; l < lanes; l++) { c.beginPath(); c.moveTo(l * lw, topY); c.lineTo(l * lw, H); c.stroke(); }
+  const yOf = (z) => topY + (1 - Math.max(0, Math.min(1, z))) * (playerY - topY);
+  // entities far->near
+  const sorted = [...g.entities].sort((a, b) => b.z - a.z);
+  for (const e of sorted) {
+    if (e.collected || e.resolved) continue;
+    const x = e.lane * lw + lw / 2, y = yOf(e.z), s = 0.5 + (1 - e.z) * 0.9;
+    if (e.kind === KINDS.COIN) {
+      c.fillStyle = '#ffcf2e'; c.beginPath(); c.arc(x, y, 4 * s, 0, Math.PI * 2); c.fill();
+    } else if (e.kind === KINDS.GROUND) {            // hole
+      c.fillStyle = '#1f4e7a'; c.beginPath(); c.ellipse(x, y, 11 * s, 5 * s, 0, 0, Math.PI * 2); c.fill();
+    } else {                                          // ice block
+      c.fillStyle = '#7cc2f0'; c.fillRect(x - 9 * s, y - 14 * s, 18 * s, 16 * s);
+      c.strokeStyle = '#fff'; c.lineWidth = 1; c.strokeRect(x - 9 * s, y - 14 * s, 18 * s, 16 * s);
+    }
+  }
+  // penguin
+  const pl = playerLaneFloat(g), px = pl * lw + lw / 2;
+  c.fillStyle = g.freezeT > 0 ? '#4a5e82' : '#23303a';
+  c.beginPath(); c.ellipse(px, playerY, 8, 11, 0, 0, Math.PI * 2); c.fill();
+  c.fillStyle = g.freezeT > 0 ? '#dff1ff' : '#fff';
+  c.beginPath(); c.ellipse(px, playerY + 1, 4.5, 7, 0, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#ff9f1c'; c.fillRect(px - 4, playerY + 11, 3, 3); c.fillRect(px + 1, playerY + 11, 3, 3);
+  // freeze tint
+  if (g.freezeT > 0) {
+    c.fillStyle = 'rgba(120,190,255,0.35)'; c.fillRect(0, 0, W, H);
+    c.fillStyle = '#1769b0'; c.font = 'bold 13px monospace'; c.textAlign = 'center';
+    c.fillText('FROZEN', W / 2, H / 2);
+  }
+  if (g.over) {
+    c.fillStyle = 'rgba(16,35,63,0.6)'; c.fillRect(0, 0, W, H);
+    c.fillStyle = '#ffd23d'; c.font = 'bold 14px monospace'; c.textAlign = 'center';
+    c.fillText('TIME UP', W / 2, H / 2 - 4);
+    c.fillStyle = '#fff'; c.font = '11px monospace';
+    c.fillText('score ' + g.finalScore, W / 2, H / 2 + 12);
+  }
 }
 
 // Test hooks (used by the headless harness; no effect in the browser).
 if (typeof window !== 'undefined') {
-  window.MOSAIC = { mosaic, chooseAction, scorePredictions, parseModuleReply, callModule, MCFG };
+  window.MOSAIC = {
+    mosaic, chooseAction, scorePredictions, parseModuleReply, callModule, MCFG,
+    chooseActionAmong, scoreSubset, evalSequential, evalParallel, makeModuleSet, CMP,
+    makeController, stepCmpGame, drawMiniGame,
+  };
 }
 
 // ---- Main loop -----------------------------------------------------------
@@ -1682,6 +2125,11 @@ function loop(now) {
   while (acc >= CONFIG.tickMs) {
     const action = agentStep(game);
     step(game, action);
+    // Comparison mode steps both seeded games in lockstep with the main clock.
+    if (cmp.active) {
+      stepCmpGame(cmp.gameL, cmp.ctrlL);
+      stepCmpGame(cmp.gameR, cmp.ctrlR);
+    }
     acc -= CONFIG.tickMs;
   }
   // Presentation-only: reset FX on a fresh run, then react to state changes.
@@ -1691,6 +2139,13 @@ function loop(now) {
   updateFx(game, dtf);
   draw(game);
   updateHud(game);
+  // Comparison mini-views + live stats.
+  if (cmp.active) {
+    if (cmp.ctxL) drawMiniGame(cmp.ctxL, cmp.gameL);
+    if (cmp.ctxR) drawMiniGame(cmp.ctxR, cmp.gameR);
+    updateCmpStats();
+    if (cmp.gameL.over && cmp.gameR.over) setCmpStatus('midle', 'finished — seed ' + cmp.seed.toString(16));
+  }
   requestAnimationFrame(loop);
 }
 
