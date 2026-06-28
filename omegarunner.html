@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>omegarunner</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #0e1116;
+    color: #e6edf3;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 16px;
+  }
+  h1 {
+    margin: 4px 0 0;
+    font-size: 20px;
+    letter-spacing: 2px;
+    font-weight: 600;
+    color: #58a6ff;
+  }
+  #game {
+    background: linear-gradient(#1a2030, #0c0f16);
+    border: 1px solid #283042;
+    border-radius: 10px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    display: block;
+  }
+  .row {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+    width: 820px;
+    max-width: 100%;
+  }
+  .col { flex: 1; }
+  .panel {
+    background: #11161f;
+    border: 1px solid #283042;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .panel h2 {
+    margin: 0 0 6px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #8b949e;
+  }
+  #state {
+    white-space: pre-wrap;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 12px;
+    color: #ade6c0;
+    margin: 0;
+  }
+  .hint { color: #8b949e; font-size: 12px; }
+  kbd {
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: monospace;
+    font-size: 11px;
+  }
+  #hud { font-variant-numeric: tabular-nums; }
+  #hud b { color: #ffd166; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>OMEGARUNNER</h1>
+  <canvas id="game" width="600" height="640"></canvas>
+  <div class="row">
+    <div class="col">
+      <div class="panel" id="hud">
+        Score: <b id="score">0</b> &nbsp;|&nbsp; Coins: <b id="coins">0</b>
+        &nbsp;|&nbsp; Distance: <b id="dist">0</b>m &nbsp;|&nbsp; Speed: <b id="speed">1.0</b>x
+        <div class="hint" style="margin-top:6px">
+          <kbd>&larr;</kbd> <kbd>&rarr;</kbd> move lanes &nbsp;
+          <kbd>&uarr;</kbd> / <kbd>Space</kbd> jump &nbsp;
+          <kbd>R</kbd> restart &nbsp;
+          <kbd>P</kbd> pause
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="panel">
+        <h2>LLM State (per tick)</h2>
+        <pre id="state">—</pre>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+"use strict";
+/* =========================================================================
+   omegarunner — endless runner game engine
+   Single-file canvas game. No LLM yet; agentStep() is the seam where an
+   LLM (or any policy) will later choose an action each tick.
+   ========================================================================= */
+
+// ---- Configuration -------------------------------------------------------
+const CONFIG = {
+  lanes: 3,
+  canvasW: 600,
+  canvasH: 640,
+  horizonY: 120,        // where the track converges (top)
+  laneSwitchTicks: 6,   // ticks to slide between lanes (visual smoothing)
+  jumpTicks: 26,        // total airtime of a jump, in ticks
+  jumpHeight: 1.0,      // peak lift as fraction (used by arc)
+  tickMs: 1000 / 60,    // logic runs per animation frame (~60 fps)
+  baseSpeed: 0.18,      // world units (track-fraction) per tick at 1x
+  speedRampPer1000: 0.30, // speed multiplier gained per 1000 distance units
+  speedMax: 2.1,        // cap so late game stays humanly reactable
+  spawnGapMin: 22,      // min ticks between spawn attempts
+  spawnGapMax: 40,      // max ticks between spawn attempts
+  hardRowExtraGap: 12,  // extra spacing after a hard (blocking) row
+  coinValue: 10,
+  // An entity's "z" is its position along the track: 1.0 = far horizon,
+  // 0.0 = at the player's feet. It decreases each tick as it approaches.
+  zStart: 1.0,
+  zPlayer: 0.08,        // z at which an entity is level with the player
+  zDespawn: -0.05,
+};
+
+// Obstacle kinds:
+//  'ground'  -> can be avoided by switching lane OR jumping over it.
+//  'barrier' -> tall; can ONLY be avoided by switching lane (no jumping).
+const KINDS = { GROUND: 'ground', BARRIER: 'barrier', COIN: 'coin' };
+
+// ---- Game state ----------------------------------------------------------
+let game;
+
+function newGame() {
+  return {
+    tick: 0,
+    running: true,
+    paused: false,
+    over: false,
+    score: 0,
+    coins: 0,
+    distance: 0,
+    speedMult: 1.0,
+    // player
+    lane: 1,                 // logical lane index (0..lanes-1)
+    laneFrom: 1,             // for visual interpolation
+    laneAnim: 0,             // ticks remaining in lane slide
+    jumpT: 0,                // ticks remaining in current jump (0 = grounded)
+    // world
+    entities: [],            // {id, kind, lane, z}
+    nextId: 1,
+    spawnCountdown: 30,
+    lastRowHard: false,      // pacing: was the previous spawned row a blocking one?
+    lastState: '',
+  };
+}
+
+// ---- Spawning ------------------------------------------------------------
+// Deterministic-ish RNG seam left simple (Math.random) for now.
+function rint(a, b) { return a + Math.floor(Math.random() * (b - a + 1)); }
+
+function trySpawn(g) {
+  g.spawnCountdown--;
+  if (g.spawnCountdown > 0) return;
+  g.spawnCountdown = rint(CONFIG.spawnGapMin, CONFIG.spawnGapMax);
+
+  // Difficulty pacing: a "hard" row blocks two or three lanes and demands a
+  // precise response (dodge or jump). Never place two hard rows back-to-back —
+  // always give an easy/coin breather between them, and space them further
+  // apart in time, so any sequence stays survivable for a human.
+  const allowHard = !g.lastRowHard;
+  const roll = Math.random();
+  let hard = false;
+
+  if (roll < 0.42) {
+    // Easy: single obstacle in one lane (+ maybe a coin elsewhere).
+    const lane = rint(0, CONFIG.lanes - 1);
+    const kind = Math.random() < 0.5 ? KINDS.GROUND : KINDS.BARRIER;
+    g.entities.push(makeEntity(g, kind, lane));
+    if (Math.random() < 0.5) {
+      g.entities.push(makeEntity(g, KINDS.COIN, pickOtherLane(lane)));
+    }
+  } else if (roll < 0.68 && allowHard) {
+    // Hard: two lanes blocked, one clear lane (force a lane choice).
+    hard = true;
+    const clear = rint(0, CONFIG.lanes - 1);
+    for (let l = 0; l < CONFIG.lanes; l++) {
+      if (l === clear) continue;
+      const kind = Math.random() < 0.5 ? KINDS.GROUND : KINDS.BARRIER;
+      g.entities.push(makeEntity(g, kind, l));
+    }
+    if (Math.random() < 0.6) g.entities.push(makeEntity(g, KINDS.COIN, clear));
+  } else if (roll < 0.80 && allowHard) {
+    // Hard: a full row of GROUND obstacles -> must jump (all lanes covered).
+    hard = true;
+    for (let l = 0; l < CONFIG.lanes; l++) {
+      g.entities.push(makeEntity(g, KINDS.GROUND, l));
+    }
+  } else {
+    // Coins only — a little line of them in one lane (a breather).
+    g.entities.push(makeEntity(g, KINDS.COIN, rint(0, CONFIG.lanes - 1)));
+  }
+
+  if (hard) g.spawnCountdown += CONFIG.hardRowExtraGap;
+  g.lastRowHard = hard;
+}
+
+function makeEntity(g, kind, lane) {
+  return { id: g.nextId++, kind, lane, z: CONFIG.zStart };
+}
+
+function pickOtherLane(lane) {
+  let l;
+  do { l = rint(0, CONFIG.lanes - 1); } while (l === lane);
+  return l;
+}
+
+// ---- Player actions ------------------------------------------------------
+// The single point an agent/LLM (or keyboard) drives the player.
+//   action ∈ {'left','right','jump','stay'}
+function applyAction(g, action) {
+  if (action === 'left' && g.lane > 0 && g.laneAnim === 0) {
+    g.laneFrom = g.lane; g.lane -= 1; g.laneAnim = CONFIG.laneSwitchTicks;
+  } else if (action === 'right' && g.lane < CONFIG.lanes - 1 && g.laneAnim === 0) {
+    g.laneFrom = g.lane; g.lane += 1; g.laneAnim = CONFIG.laneSwitchTicks;
+  } else if (action === 'jump' && g.jumpT === 0) {
+    g.jumpT = CONFIG.jumpTicks;
+  }
+  // 'stay' does nothing.
+}
+
+// Player vertical lift (0 = ground, up to 1 at apex) from a jump.
+function jumpLift(g) {
+  if (g.jumpT === 0) return 0;
+  const p = 1 - (g.jumpT / CONFIG.jumpTicks); // 0..1 through the jump
+  return Math.sin(Math.PI * p) * CONFIG.jumpHeight;
+}
+
+function isAirborne(g) {
+  // Considered off the ground for the middle portion of the arc, high enough
+  // that ground obstacles pass underneath.
+  return jumpLift(g) > 0.45;
+}
+
+// ---- Simulation step -----------------------------------------------------
+function step(g, action) {
+  if (!g.running || g.paused || g.over) return;
+
+  applyAction(g, action);
+
+  // Advance timers.
+  if (g.laneAnim > 0) g.laneAnim--;
+  if (g.jumpT > 0) g.jumpT--;
+
+  // Speed scales with distance, capped so it stays humanly reactable.
+  g.speedMult = Math.min(CONFIG.speedMax,
+    1 + (g.distance / 1000) * CONFIG.speedRampPer1000);
+  const dz = CONFIG.baseSpeed * 0.06 * g.speedMult;
+  g.distance += g.speedMult * 1.0;
+
+  // Advance entities toward the player.
+  for (const e of g.entities) e.z -= dz;
+
+  // Collisions / pickups happen as entities cross the player plane.
+  for (const e of g.entities) {
+    if (e.collected || e.resolved) continue;
+    // Entity is "at" the player when its z is within a small band of zPlayer.
+    if (e.z <= CONFIG.zPlayer + 0.02 && e.z >= CONFIG.zPlayer - 0.06) {
+      if (e.lane !== g.lane) continue; // different lane: no interaction
+      if (e.kind === KINDS.COIN) {
+        // Coins can be grabbed on the ground or mid-jump.
+        e.collected = true;
+        g.coins += 1;
+        g.score += CONFIG.coinValue;
+      } else if (e.kind === KINDS.GROUND) {
+        if (isAirborne(g)) {
+          e.resolved = true; // jumped over it
+        } else {
+          endGame(g, e);
+          return;
+        }
+      } else if (e.kind === KINDS.BARRIER) {
+        // Tall barrier: jumping does not help.
+        endGame(g, e);
+        return;
+      }
+    }
+  }
+
+  // Cull entities that have passed.
+  g.entities = g.entities.filter(e => e.z > CONFIG.zDespawn && !e.collected);
+
+  trySpawn(g);
+
+  // Survival scoring.
+  g.score += 1;
+  g.tick++;
+
+  g.lastState = encodeState(g);
+}
+
+function endGame(g, byEntity) {
+  g.over = true;
+  g.running = false;
+  g.deathBy = byEntity ? byEntity.kind : 'obstacle';
+  g.lastState = encodeState(g);
+}
+
+// ---- Text state encoder (LLM-facing) ------------------------------------
+// Produces a compact textual description of the current tick: for each lane,
+// the nearest notable entity ahead and how far; plus the player's lane and
+// whether they are jumping or on the ground.
+function encodeState(g) {
+  const lines = [];
+  for (let l = 0; l < CONFIG.lanes; l++) {
+    // Find nearest entity ahead in this lane (smallest z that is still ahead).
+    let nearest = null;
+    for (const e of g.entities) {
+      if (e.lane !== l || e.collected || e.resolved) continue;
+      if (e.z < CONFIG.zPlayer - 0.02) continue; // already passed
+      if (!nearest || e.z < nearest.z) nearest = e;
+    }
+    let desc;
+    if (!nearest) {
+      desc = 'clear';
+    } else {
+      // Convert z-distance to an integer "tiles ahead" for readability.
+      const ahead = Math.max(0, Math.round((nearest.z - CONFIG.zPlayer) / 0.12));
+      const label = nearest.kind === KINDS.GROUND ? 'ground-obstacle'
+                  : nearest.kind === KINDS.BARRIER ? 'barrier-obstacle'
+                  : 'coin';
+      desc = `${label} ${ahead} ahead`;
+    }
+    lines.push(`lane${l + 1}: ${desc}`);
+  }
+  const posture = g.jumpT > 0 ? (isAirborne(g) ? 'jumping(airborne)' : 'jumping(rising/landing)') : 'on-ground';
+  lines.push(`player in lane${g.lane + 1}, ${posture}`);
+  lines.push(`score=${g.score} coins=${g.coins} speed=${g.speedMult.toFixed(2)}x`);
+  return lines.join('; ');
+}
+
+// ---- Agent seam (LLM goes here later) -----------------------------------
+// For now returns the keyboard-buffered action. Later: query an LLM with
+// encodeState(g) and map its reply to one of {left,right,jump,stay}.
+function agentStep(g) {
+  const a = pendingAction;
+  pendingAction = 'stay';
+  return a;
+}
+
+// ---- Rendering -----------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// Map a lane index + z-depth to screen coordinates with simple perspective.
+function laneCenterX(laneFloat, z) {
+  // z: 1 far .. 0 near. Track widens as it comes closer.
+  const near = 1 - z; // 0 far .. 1 near
+  const halfTop = 70;
+  const halfBot = 270;
+  const half = halfTop + (halfBot - halfTop) * near;
+  const cx = CONFIG.canvasW / 2;
+  const laneFrac = (laneFloat - (CONFIG.lanes - 1) / 2) / ((CONFIG.lanes) / 2);
+  return cx + laneFrac * half;
+}
+function depthY(z) {
+  const near = 1 - z;
+  return CONFIG.horizonY + (CONFIG.canvasH - CONFIG.horizonY) * Math.pow(near, 1.5);
+}
+function depthScale(z) {
+  const near = 1 - z;
+  return 0.25 + near * 1.05;
+}
+
+function playerLaneFloat(g) {
+  if (g.laneAnim === 0) return g.lane;
+  const t = 1 - g.laneAnim / CONFIG.laneSwitchTicks;
+  return g.laneFrom + (g.lane - g.laneFrom) * t;
+}
+
+function draw(g) {
+  ctx.clearRect(0, 0, CONFIG.canvasW, CONFIG.canvasH);
+
+  // Sky / ground already via CSS gradient; draw the track.
+  drawTrack();
+
+  // Draw entities far-to-near (painter's algorithm).
+  const sorted = [...g.entities].sort((a, b) => b.z - a.z);
+  for (const e of sorted) drawEntity(g, e);
+
+  // Player.
+  drawPlayer(g);
+
+  // Overlays.
+  if (g.over) drawGameOver(g);
+  else if (g.paused) drawCenterText('PAUSED', '#ffd166');
+}
+
+function drawTrack() {
+  ctx.save();
+  // Track polygon.
+  const topL = laneCenterX(-0.5, 1), topR = laneCenterX(CONFIG.lanes - 0.5, 1);
+  const botL = laneCenterX(-0.5, 0), botR = laneCenterX(CONFIG.lanes - 0.5, 0);
+  ctx.beginPath();
+  ctx.moveTo(topL, depthY(1));
+  ctx.lineTo(topR, depthY(1));
+  ctx.lineTo(botR, depthY(0));
+  ctx.lineTo(botL, depthY(0));
+  ctx.closePath();
+  ctx.fillStyle = '#161c28';
+  ctx.fill();
+
+  // Lane divider lines.
+  ctx.strokeStyle = 'rgba(120,140,180,0.35)';
+  ctx.lineWidth = 2;
+  for (let l = 0; l <= CONFIG.lanes; l++) {
+    const lf = l - 0.5;
+    ctx.beginPath();
+    ctx.moveTo(laneCenterX(lf, 1), depthY(1));
+    ctx.lineTo(laneCenterX(lf, 0), depthY(0));
+    ctx.stroke();
+  }
+
+  // Moving rungs for a sense of speed.
+  const phase = (game ? game.distance * 0.02 : 0) % 1;
+  ctx.strokeStyle = 'rgba(120,140,180,0.18)';
+  for (let i = 0; i < 12; i++) {
+    let z = ((i / 12) + phase) % 1;
+    z = 1 - z; // near..far mapping
+    ctx.beginPath();
+    ctx.moveTo(laneCenterX(-0.5, z), depthY(z));
+    ctx.lineTo(laneCenterX(CONFIG.lanes - 0.5, z), depthY(z));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawEntity(g, e) {
+  const x = laneCenterX(e.lane, e.z);
+  const y = depthY(e.z);
+  const s = depthScale(e.z);
+  if (e.kind === KINDS.COIN) {
+    const r = 14 * s;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y - 26 * s, r, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffd166';
+    ctx.fill();
+    ctx.lineWidth = 2 * s;
+    ctx.strokeStyle = '#b8860b';
+    ctx.stroke();
+    ctx.fillStyle = '#b8860b';
+    ctx.font = `bold ${14 * s}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('$', x, y - 26 * s);
+    ctx.restore();
+  } else if (e.kind === KINDS.GROUND) {
+    // Short hurdle — jumpable.
+    const w = 70 * s, h = 26 * s;
+    ctx.fillStyle = '#e85d75';
+    ctx.fillRect(x - w / 2, y - h, w, h);
+    ctx.fillStyle = '#7a2230';
+    ctx.fillRect(x - w / 2, y - 6 * s, w, 6 * s);
+  } else if (e.kind === KINDS.BARRIER) {
+    // Tall barrier — must dodge by lane.
+    const w = 78 * s, h = 86 * s;
+    ctx.fillStyle = '#5d8df8';
+    ctx.fillRect(x - w / 2, y - h, w, h);
+    ctx.fillStyle = '#2b4a8a';
+    for (let i = 0; i < 3; i++) {
+      ctx.fillRect(x - w / 2, y - h + (i + 1) * h / 4 - 3 * s, w, 5 * s);
+    }
+  }
+}
+
+function drawPlayer(g) {
+  const lf = playerLaneFloat(g);
+  const z = CONFIG.zPlayer;
+  const x = laneCenterX(lf, z);
+  const baseY = depthY(z);
+  const s = depthScale(z) * 0.9;
+  const lift = jumpLift(g) * 120; // pixels of lift at apex
+
+  // Shadow shrinks as player rises.
+  ctx.save();
+  ctx.globalAlpha = 0.35 - jumpLift(g) * 0.2;
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.ellipse(x, baseY, 34 * s, 12 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  const y = baseY - lift;
+  // Body.
+  const w = 40 * s, h = 64 * s;
+  ctx.fillStyle = isAirborne(g) ? '#7ee787' : '#39d353';
+  roundRect(x - w / 2, y - h, w, h, 8 * s);
+  ctx.fill();
+  // Head.
+  ctx.fillStyle = '#caffd6';
+  ctx.beginPath();
+  ctx.arc(x, y - h - 12 * s, 14 * s, 0, Math.PI * 2);
+  ctx.fill();
+  // Eyes (facing forward/down the track).
+  ctx.fillStyle = '#0e1116';
+  ctx.beginPath(); ctx.arc(x - 5 * s, y - h - 13 * s, 2.4 * s, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 5 * s, y - h - 13 * s, 2.4 * s, 0, 7); ctx.fill();
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawCenterText(text, color) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(8,10,14,0.6)';
+  ctx.fillRect(0, CONFIG.canvasH / 2 - 70, CONFIG.canvasW, 140);
+  ctx.fillStyle = color || '#fff';
+  ctx.font = 'bold 44px Segoe UI, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, CONFIG.canvasW / 2, CONFIG.canvasH / 2);
+  ctx.restore();
+}
+
+function drawGameOver(g) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(8,10,14,0.72)';
+  ctx.fillRect(0, 0, CONFIG.canvasW, CONFIG.canvasH);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ff7b72';
+  ctx.font = 'bold 52px Segoe UI, sans-serif';
+  ctx.fillText('GAME OVER', CONFIG.canvasW / 2, CONFIG.canvasH / 2 - 50);
+  ctx.fillStyle = '#e6edf3';
+  ctx.font = '20px Segoe UI, sans-serif';
+  ctx.fillText(`Hit a ${g.deathBy}`, CONFIG.canvasW / 2, CONFIG.canvasH / 2 + 0);
+  ctx.fillText(`Score ${g.score}   ·   Coins ${g.coins}   ·   ${Math.round(g.distance)}m`,
+    CONFIG.canvasW / 2, CONFIG.canvasH / 2 + 34);
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '16px Segoe UI, sans-serif';
+  ctx.fillText('Press R to run again', CONFIG.canvasW / 2, CONFIG.canvasH / 2 + 76);
+  ctx.restore();
+}
+
+// ---- HUD -----------------------------------------------------------------
+function updateHud(g) {
+  document.getElementById('score').textContent = g.score;
+  document.getElementById('coins').textContent = g.coins;
+  document.getElementById('dist').textContent = Math.round(g.distance);
+  document.getElementById('speed').textContent = g.speedMult.toFixed(1);
+  document.getElementById('state').textContent = g.lastState || '—';
+}
+
+// ---- Input ---------------------------------------------------------------
+let pendingAction = 'stay';
+window.addEventListener('keydown', (ev) => {
+  switch (ev.key) {
+    case 'ArrowLeft':  pendingAction = 'left';  ev.preventDefault(); break;
+    case 'ArrowRight': pendingAction = 'right'; ev.preventDefault(); break;
+    case 'ArrowUp':
+    case ' ':          pendingAction = 'jump';  ev.preventDefault(); break;
+    case 'r': case 'R':
+      game = newGame(); break;
+    case 'p': case 'P':
+      if (!game.over) game.paused = !game.paused; break;
+  }
+});
+
+// ---- Main loop -----------------------------------------------------------
+let acc = 0, last = performance.now();
+function loop(now) {
+  const dt = now - last; last = now;
+  acc += dt;
+  // Fixed-timestep logic.
+  while (acc >= CONFIG.tickMs) {
+    const action = agentStep(game);
+    step(game, action);
+    acc -= CONFIG.tickMs;
+  }
+  draw(game);
+  updateHud(game);
+  requestAnimationFrame(loop);
+}
+
+game = newGame();
+game.lastState = encodeState(game);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
