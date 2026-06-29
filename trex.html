@@ -86,14 +86,16 @@
         <div class="cmp-head">slow LLM &mdash; 1200 ms / decision</div>
         <canvas id="cmp-slow" width="560" height="120"></canvas>
         <div class="cmp-meta">progress <span class="pbar"><i id="bar-slow"></i></span>
-          <span id="pct-slow">0%</span> &nbsp;·&nbsp; cleared <span id="cl-slow">0</span></div>
+          <span id="pct-slow">0%</span> &nbsp;·&nbsp; cleared <span id="cl-slow">0</span>
+          &nbsp;·&nbsp; coins <span id="co-slow">0</span></div>
         <div class="cmp-log" id="log-slow"></div>
       </div>
       <div class="cmp-lane">
         <div class="cmp-head">Cerebras &mdash; 50 ms / decision</div>
         <canvas id="cmp-fast" width="560" height="120"></canvas>
         <div class="cmp-meta">progress <span class="pbar"><i id="bar-fast"></i></span>
-          <span id="pct-fast">0%</span> &nbsp;·&nbsp; cleared <span id="cl-fast">0</span></div>
+          <span id="pct-fast">0%</span> &nbsp;·&nbsp; cleared <span id="cl-fast">0</span>
+          &nbsp;·&nbsp; coins <span id="co-fast">0</span></div>
         <div class="cmp-log" id="log-fast"></div>
       </div>
     </div>
@@ -225,8 +227,20 @@ function resetDecision() {
 }
 
 // --- (5) LLM seam: mock (rule-based) now, real Cerebras when toggled. ----
+// SINGLE SOURCE OF TRUTH for the active mode — read by BOTH the call path and
+// the overlay, so the overlay can never claim Cerebras unless a keyed call runs:
+//   unchecked            -> 'mock'
+//   checked + key present -> 'cerebras'
+//   checked + no key      -> 'mock-no-key' (falls back to mock)
+function llmKeyPresent() {
+  return ((((document.getElementById('llm-key') || {}).value) || '').trim().length > 0);
+}
+function llmMode() {
+  if (!useRealLLM) return 'mock';
+  return llmKeyPresent() ? 'cerebras' : 'mock-no-key';
+}
 async function callCerebrasLLM(prompt, temperature, meta) {
-  if (!useRealLLM) return mockLLM(meta);          // meta = {state, action}
+  if (llmMode() !== 'cerebras') return mockLLM(meta);   // mock unless checked AND key present
   return realCerebrasLLM(prompt, temperature);
 }
 // Rule-based stand-in returning the SAME forced 3-way JSON the real model must.
@@ -558,7 +572,9 @@ function drawDebug() {
     html += '<div class="row">command: <b>' + (L.command || '?').toUpperCase() + '</b></div>';
     html += '<div class="row">result: ' + (L.result || '—') + '</div>';
   }
-  html += '<div class="row" style="color:#9a9a9a">LLM: ' + (useRealLLM ? 'Cerebras' : 'mock') + '</div>';
+  const _m = llmMode();
+  const _lbl = _m === 'cerebras' ? 'Cerebras' : _m === 'mock-no-key' ? 'mock (no key)' : 'mock';
+  html += '<div class="row" style="color:#9a9a9a">LLM: ' + _lbl + '</div>';
   el.innerHTML = html;
 }
 
@@ -598,22 +614,26 @@ function mulberry32(a) {
     return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
 }
-// Build the shared course: a list of {dist, o} (obstacle) at increasing positions.
+// Build the shared course: obstacles {dist,o} AND coins {dist,y} at increasing
+// positions (same obstacle/coin types + spawn rules as single play). Both
+// runners read this ONE object, so their courses are byte-identical.
 function genCourse(seed) {
   const rng = mulberry32(seed);
-  const items = []; let x = 360;
+  const items = []; const coins = []; let x = 360;
   for (let i = 0; i < CMP.count; i++) {
     x += CMP.spacingMin + rng() * CMP.spacingVar;
     let o;
     if (rng() < 0.7) { const big = rng() < 0.5; o = { kind: 'cactus', h: big ? 50 : 35 }; }
     else { const hi = rng() < 0.5; o = { kind: 'bird', y: hi ? (GROUND - 70) : (GROUND - 30), high: hi }; }
     items.push({ dist: Math.round(x), o });
+    // coin spawning, same idea as single play: a flag at jump height between obstacles
+    if (rng() < 0.55) coins.push({ dist: Math.round(x + 35 + rng() * 45), y: GROUND - 30 - rng() * 55 });
   }
-  return { items, len: Math.round(x + 320) };
+  return { items, coins, len: Math.round(x + 320) };
 }
 function makeRunner(latencyMs, course) {
-  return { latency: latencyMs, course, pos: 0, idx: 0, deciding: false, decideUntil: 0, decideStart: 0,
-           lastCmd: null, pendingFront: '', cleared: 0, done: false, log: [],
+  return { latency: latencyMs, course, pos: 0, idx: 0, coinIdx: 0, deciding: false, decideUntil: 0, decideStart: 0,
+           lastCmd: null, pendingFront: '', cleared: 0, coinsGot: 0, done: false, log: [],
            dinoY: MINI.ground - MINI.dinoH, dinoVy: 0, onGround: true };
 }
 // Discrete "front" of a course obstacle (same vocabulary the LLM sees).
@@ -645,6 +665,11 @@ function cmpStep(r, now, dt) {
     return;
   }
   r.pos += CMP.speedPxps * dt / 1000;                // RUN: advance the course
+  // coin collection — identical rule for both runners (collect each coin the
+  // runner reaches on the shared course).
+  while (r.coinIdx < r.course.coins.length && r.pos >= r.course.coins[r.coinIdx].dist) {
+    r.coinsGot++; r.coinIdx++;
+  }
   const it = r.course.items[r.idx];
   if (it) {
     const ahead = it.dist - r.pos;
@@ -677,6 +702,12 @@ function drawCmpObs(ctx, o, sx) {
     ctx.fillRect(sx + (o.high ? 0 : 0), by - 4, 6, 4);
   }
 }
+function drawCmpCoin(ctx, c, sx) {
+  const cy = MINI.ground - (GROUND - c.y);   // same height above ground as single play
+  ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(sx, cy, 6, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(sx, cy, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = INK;
+}
 function cmpDrawLane(ctx, r) {
   if (!ctx) return;
   ctx.clearRect(0, 0, MINI.W, MINI.H);
@@ -687,6 +718,13 @@ function cmpDrawLane(ctx, r) {
   ctx.fillRect(dx, dy, 22, 18);
   ctx.fillRect(dx - 8, dy + 4, 10, 7);
   ctx.fillRect(dx + 4, dy + 18, 6, 8); ctx.fillRect(dx + 13, dy + 18, 6, 8);
+  // upcoming coins (uncollected)
+  for (let i = r.coinIdx; i < r.course.coins.length; i++) {
+    const sx = dx + (r.course.coins[i].dist - r.pos);
+    if (sx > MINI.W + 40) break;
+    if (sx < -40) continue;
+    drawCmpCoin(ctx, r.course.coins[i], sx);
+  }
   // upcoming obstacles
   for (let i = r.idx; i < r.course.items.length; i++) {
     const sx = dx + (r.course.items[i].dist - r.pos);
@@ -717,6 +755,7 @@ function cmpUpdateHUD() {
     const bar = document.getElementById('bar-' + suf); if (bar) bar.style.width = p.toFixed(1) + '%';
     cmpSet('pct-' + suf, p.toFixed(0) + '%');
     cmpSet('cl-' + suf, String(r.cleared));
+    cmpSet('co-' + suf, String(r.coinsGot));
     cmpSetHTML('log-' + suf, r.log.length ? r.log.join('<br>') : '<span style="color:#9a9a9a">…waiting for first decision</span>');
   }
 }
@@ -724,8 +763,9 @@ function cmpVerdict() {
   const slowP = Math.round(cmpProgress(cmp.slow)), fastP = Math.round(cmpProgress(cmp.fast));
   cmpSet('cmp-verdict',
     'Same elapsed time (' + (cmp.elapsed / 1000).toFixed(1) + 's) — both judged correctly, neither died, ' +
-    'but the slow LLM covered only ' + slowP + '% while Cerebras reached ' + fastP + '% — because it pauses ~' +
-    CMP.slowMs + 'ms at every decision. Speed = throughput, not survival.');
+    'but the slow LLM covered only ' + slowP + '% (' + cmp.slow.coinsGot + ' coins) while Cerebras reached ' +
+    fastP + '% (' + cmp.fast.coinsGot + ' coins) — because it pauses ~' + CMP.slowMs +
+    'ms at every decision. Speed = throughput, not survival.');
 }
 function cmpFrame(now) {
   if (!cmp.running) return;
@@ -834,7 +874,7 @@ if (typeof window !== 'undefined') {
     getWorldState, classifyFront, distBucket, obstacleDx, buildPrompt, parsePrediction,
     predictExpert, decide, controlStep, update, start, gameOver,
     scoreResult, actualOutcome, mockLLM, spawnObstacle, spawnCoin, hit, applyAction,
-    DUCK_H, GROUND, GROUND_Y, DINO_H,
+    DUCK_H, GROUND, GROUND_Y, DINO_H, llmMode, llmKeyPresent,
     setReal: v => { useRealLLM = v; },
     // comparison mode
     CMP, cmp, mulberry32, genCourse, makeRunner, cmpStep, cmpDecide, cmpProgress, cmpStart, setMode,
