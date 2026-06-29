@@ -218,15 +218,18 @@
           <span class="hint" id="m-info"></span>
         </div>
         <div class="hint" style="margin:2px 0 8px">
-          Three experts (same model, different system prompts), each a forward+inverse
-          <b>pair</b>, with a <b>responsibility predictor (RP)</b>.
+          Three <b>identical, unspecialised</b> experts (same neutral prompt, no assigned
+          personalities) + a <b>responsibility predictor (RP)</b>. Each keeps a private
+          <b>self memory</b> — its own per-situation track record — fed back into its prompt,
+          so the experts <b>differentiate from experience</b> with no human-assigned roles.
           <b>Phase 1 — select:</b> from the situation signature (sensory cues only) the RP
           looks up each expert's learned forward-accuracy → λ; the executed action is the
           λ-weighted vote over their inverse proposals.
-          <b>Phase 2 — learn:</b> the deterministic game gives the exact outcome; code
-          scores each expert's forward prediction and trains the RP for this situation.
-          Columns show <b>prior</b> (RP accuracy used to select, with sample count),
-          <b>λ</b> (the bar), and <b>e</b> (forward error this tick, used to learn).
+          <b>Phase 2 — learn:</b> the deterministic game gives the exact outcome; code scores
+          each expert's forward prediction and updates that expert's record / self memory.
+          Over time distinct experts "claim" different situations. The subtitle under each
+          name shows what it has specialised into; columns show <b>prior</b> (RP accuracy,
+          with sample count), <b>λ</b> (the bar), and <b>e</b> (forward error this tick).
         </div>
         <div class="hint" style="margin:0 0 8px">
           situation signature: <code id="m-sig" style="font-weight:700;color:#10233f">—</code>
@@ -1490,10 +1493,20 @@ window.addEventListener('keydown', (ev) => {
 
 /* =========================================================================
    MOSAIC controller (Wolpert & Kawato 1998) over an LLM, WITH a responsibility
-   predictor (RP). N modules ("experts"), each the SAME model (gemma-4-31b on
-   Cerebras) with a DIFFERENT system prompt / personality, each a forward+inverse
-   PAIR. The RP is what lets the controller pick "the right expert for THIS
-   situation" instead of just the overall-best one.
+   predictor (RP) and EMERGENT specialization. N modules ("experts") are the SAME
+   model (gemma-4-31b on Cerebras) starting from the SAME neutral prompt — NO
+   hardcoded personalities. Each is a forward+inverse PAIR and owns a private
+   "self memory" (its per-situation track record) that is fed back into its own
+   prompt, so the experts differentiate FROM EXPERIENCE. The RP is what lets the
+   controller pick "the right expert for THIS situation" instead of the
+   overall-best one.
+
+   Why no personas: the forward question is objective, so persona-biased experts
+   produced IDENTICAL forward predictions -> identical per-situation accuracy ->
+   λ stuck at 1/N. Here each expert's outputs are conditioned on its OWN evolving
+   record (plus a distinct sampling seed to break the start-of-life symmetry), so
+   small early differences get reinforced and the experts drift apart, each
+   "claiming" the situations it predicts best.
 
    The chicken-and-egg fix: forward-prediction error only exists AFTER an action
    executes, so it CANNOT pick the action in the same tick. So selection uses the
@@ -1573,6 +1586,46 @@ function rpAccuracy(sig, id) {
   return (hit + RPCFG.priorA) / (n + RPCFG.priorA + RPCFG.priorB);
 }
 
+// --- Per-expert "self" memory ------------------------------------------------
+// Each expert OWNS its slice of the RP table: a per-signature {hit,n} record
+// (persisted with the table). That record IS its self memory; we summarise it
+// into a short text fed back into the expert's OWN prompt, so its inverse +
+// forward outputs are conditioned on where it has been succeeding. Over time the
+// three drift apart from experience — no human-assigned roles.
+const SELFCFG = {
+  minSamples: 2,    // ignore thinly-sampled signatures in the self summary
+  topK: 4,          // situations surfaced in the self-memory text
+  claimMinAcc: 0.6, // accuracy above which a situation counts as "claimed"
+};
+// This expert's signatures with posterior-mean accuracy (its self memory).
+function expertRecord(id) {
+  const out = [];
+  for (const sig in rp.table) {
+    const e = rp.table[sig] && rp.table[sig][id];
+    if (!e || e.n <= 0) continue;
+    out.push({ sig, hit: e.hit, n: e.n,
+      acc: (e.hit + RPCFG.priorA) / (e.n + RPCFG.priorA + RPCFG.priorB) });
+  }
+  return out.sort((a, b) => b.acc - a.acc || b.n - a.n);
+}
+// Short self-memory text injected into the expert's prompt (conditions it).
+function expertSelfSummary(id) {
+  const rec = expertRecord(id).filter(r => r.n >= SELFCFG.minSamples);
+  if (!rec.length) return 'Your track record: empty so far — commit to your own distinct best guess.';
+  const top = rec.slice(0, SELFCFG.topK)
+    .map(r => r.sig + ' ' + Math.round(r.acc * 100) + '%·' + r.n);
+  return 'Your track record by situation (accuracy·samples): ' + top.join(', ') +
+    '. Lean into the situations you predict well; explore elsewhere.';
+}
+// Compact label for the panel: which situations this expert has come to "claim".
+function expertSpecialtyLabel(id) {
+  const rec = expertRecord(id)
+    .filter(r => r.n >= SELFCFG.minSamples && r.acc >= SELFCFG.claimMinAcc)
+    .slice(0, 3);
+  if (!rec.length) return 'unspecialised';
+  return 'claims ' + rec.map(r => r.sig).join(' ');
+}
+
 // Category of the nearest entity ahead in a lane, within the near window. Mirrors
 // encodeState's "nearest ahead" logic WITHOUT modifying encodeState.
 function laneCategory(g, lane) {
@@ -1615,8 +1668,10 @@ function situationSignature(g) {
 const DECISION_INTERVAL_MS = 3600;  // min game-time between LLM decisions
 const RATELIMIT_BACKOFF_MS = 600;   // brief wait before a single retry on HTTP 429
 
-// The three expert personalities. Same model, different system prompts.
-const PERSONA_CORE =
+// Three IDENTICAL, unspecialised experts — NO hardcoded personalities. They all
+// start from the same neutral prompt (labelled Expert 1/2/3) and differentiate
+// themselves purely from experience, via their own evolving self-memory (below).
+const EXPERT_CORE =
   "You control a penguin in a 3-lane endless runner. Each decision you pick ONE action:\n" +
   "  left  = move one lane left\n  right = move one lane right\n" +
   "  jump  = hop (clears ground 'ice holes'/hurdles in your lane)\n  stay  = keep running in your lane\n" +
@@ -1633,18 +1688,16 @@ const PERSONA_CORE =
   '{"action":"left|right|jump|stay","forward":{' +
   '"left":{"coin":0,"freeze":false},"right":{"coin":0,"freeze":false},' +
   '"jump":{"coin":0,"freeze":false},"stay":{"coin":0,"freeze":false}}}\n' +
-  "Predict each action HONESTLY from the state (this is your forward model), independent of which action you chose.";
+  "You are one of several INDEPENDENT experts with NO assigned personality. You keep a private " +
+  "track record of which situations you predict well (given below). SPECIALISE: in a situation you " +
+  "have predicted accurately before, answer confidently and consistently the way that has worked; " +
+  "in a new or poorly-predicted situation, commit to your OWN distinct best guess rather than a " +
+  "bland generic one, so you can claim a niche the other experts have not taken. Do not converge.";
 
 const MODULE_DEFS = [
-  { id: 'greedy', name: 'Goldbeak', persona: 'coin-greedy',
-    bias: "PERSONALITY: COIN-GREEDY. You love gold flags above all. Chase coins aggressively, " +
-          "switch into the flag's lane whenever you can, and accept some risk to grab them." },
-  { id: 'safe', name: 'Iceguard', persona: 'safety-first',
-    bias: "PERSONALITY: SAFETY-FIRST. You hate freezing. Always pick the lane/action that avoids " +
-          "any hazard. Prefer a clear lane; only jump when a hole is in your lane and no clear lane is easy. Coins are secondary to never getting hit." },
-  { id: 'jumpy', name: 'Hopster', persona: 'jump-happy',
-    bias: "PERSONALITY: JUMP-HAPPY. You love hopping. Whenever a ground hole/hurdle is ahead in your " +
-          "lane, JUMP it rather than dodging. Jump to clear hazards and to snag flags mid-hop. (Remember jumping does NOT clear tall barriers.)" },
+  { id: 'e1', name: 'Expert 1', seed: 1009 },
+  { id: 'e2', name: 'Expert 2', seed: 2017 },
+  { id: 'e3', name: 'Expert 3', seed: 3023 },
 ];
 
 const mosaic = {
@@ -1664,9 +1717,9 @@ const mosaic = {
 // --- LLM call (OpenAI-compatible chat completions). Swappable for tests. ---
 // Returns { content, usage, timeInfo }. usage = OpenAI token usage;
 // timeInfo = Cerebras `time_info` block (used for tokens/sec).
-async function mosaicChat(base, key, model, system, user) {
+async function mosaicChat(base, key, model, system, user, seed) {
   if (typeof window !== 'undefined' && window.__mosaicChat) {
-    const r = await window.__mosaicChat({ base, key, model, system, user });
+    const r = await window.__mosaicChat({ base, key, model, system, user, seed });
     if (typeof r === 'string') return { content: r };
     return { content: r.content || '', usage: r.usage, timeInfo: r.timeInfo || r.time_info };
   }
@@ -1678,6 +1731,9 @@ async function mosaicChat(base, key, model, system, user) {
     body: JSON.stringify(body),
   });
   const base_body = { model, messages, temperature: MCFG.temperature, max_tokens: MCFG.maxTokens };
+  // Distinct per-expert seed breaks the start-of-life symmetry: identical prompts
+  // still sample differently, so the experts can diverge before any track record.
+  if (seed != null) base_body.seed = seed;
   // One brief backoff-and-retry on HTTP 429 (rate limit) so a transient burst
   // doesn't break a decision. Other failures fall through to the caller.
   const postRetrying = async (body) => {
@@ -1733,11 +1789,13 @@ function parseModuleReply(text) {
 }
 
 async function callModule(m, conn, stateText, onErr) {
-  const system = PERSONA_CORE + '\n' + m.bias;
+  // Same neutral core for every expert + ITS OWN evolving self memory — that is
+  // the only thing that differs between experts (no hardcoded persona).
+  const system = EXPERT_CORE + '\n[' + m.name + '] ' + expertSelfSummary(m.id);
   const user = 'Current state:\n' + stateText + '\n\nYour action + prediction as JSON:';
   const t0 = nowMs();
   try {
-    const { content, usage, timeInfo } = await mosaicChat(conn.base, conn.key, conn.model, system, user);
+    const { content, usage, timeInfo } = await mosaicChat(conn.base, conn.key, conn.model, system, user, m.seed);
     m.latency = Math.round(nowMs() - t0);
     m.compTokens = (usage && (usage.completion_tokens || usage.total_tokens)) || 0;
     m.compTime = (timeInfo && (timeInfo.completion_time || timeInfo.total_time)) || (m.latency / 1000);
@@ -1810,12 +1868,13 @@ function rpSelect(modules, sig) {
   return modules;
 }
 
-// --- PHASE 2: SCORE & LEARN. CODE-truth scoring + RP update. ------------------
+// --- PHASE 2: SCORE & LEARN. CODE-truth scoring + RP/self-memory update. ------
 // `actual` is the deterministic next state computed by the game. For each scored
 // module we compute its forward error for the EXECUTED action (code decides who
-// was right) and fold a binary hit into the RP record for the decision's
-// signature, sharpening the prior for that situation next time. `scored` = all
-// modules (single panel) or the evaluated subset (comparison seq mode).
+// was right) and fold a binary hit into that expert's OWN per-signature record —
+// which both sharpens the RP prior for next time AND updates the expert's self
+// memory (the summary fed back into its prompt). `scored` = all modules (single
+// panel) or the evaluated subset (comparison seq mode).
 function rpLearn(modules, scored, sig, beforeLane, actual, cfg = MCFG) {
   const inSet = new Set(scored);
   for (const m of modules) {
@@ -1823,7 +1882,7 @@ function rpLearn(modules, scored, sig, beforeLane, actual, cfg = MCFG) {
     const err = forwardError(m, actual.action, beforeLane, actual, cfg);
     m.fwdErr = err;
     m.matched = err === 0;
-    const e = rpEntry(sig, m.id);
+    const e = rpEntry(sig, m.id); // this expert's own record == its self memory
     e.n += 1; if (m.matched) e.hit += 1;
   }
   rpSave();
@@ -1947,7 +2006,7 @@ function buildModulesUI() {
     row.className = 'mod'; row.id = 'mod-' + i;
     row.innerHTML =
       '<div><div class="mname">' + m.name + '</div>' +
-      '<div class="mpersona">' + m.persona + '</div></div>' +
+      '<div class="mpersona" id="mspec-' + i + '" title="what this expert has specialised into, learned from experience">unspecialised</div></div>' +
       '<div class="maction" id="mact-' + i + '">· stay</div>' +
       '<div class="mprior na" id="mprior-' + i + '" title="RP prior: this module&#39;s learned forward-accuracy for the current situation (drives selection)">prior —</div>' +
       '<div class="mbarwrap"><div class="mbar" id="mbar-' + i + '"></div>' +
@@ -1963,6 +2022,7 @@ function renderModules(winnerIdx, action, actual) {
   mosaic.modules.forEach((m, i) => {
     const row = document.getElementById('mod-' + i);
     const act = document.getElementById('mact-' + i);
+    const spec = document.getElementById('mspec-' + i);
     const pr = document.getElementById('mprior-' + i);
     const bar = document.getElementById('mbar-' + i);
     const pct = document.getElementById('mpct-' + i);
@@ -1970,6 +2030,7 @@ function renderModules(winnerIdx, action, actual) {
     if (!row) return;
     row.classList.toggle('win', i === winnerIdx && winnerIdx >= 0);
     if (act) act.textContent = ACTION_GLYPH[m.action] || m.action;
+    if (spec) spec.textContent = expertSpecialtyLabel(m.id); // emergent, learned
     if (pr) {
       // RP prior used to SELECT: per-situation forward accuracy + sample count.
       if (m.rpAcc == null) { pr.className = 'mprior na'; pr.textContent = 'prior —'; }
@@ -2405,6 +2466,8 @@ if (typeof window !== 'undefined') {
     // Responsibility predictor (RP)
     rp, RPCFG, situationSignature, laneCategory, rpAccuracy, rpEntry,
     rpSelect, rpLearn, rpLoad, rpSave,
+    // Emergent specialization (self memory)
+    EXPERT_CORE, SELFCFG, MODULE_DEFS, expertRecord, expertSelfSummary, expertSpecialtyLabel,
   };
 }
 
