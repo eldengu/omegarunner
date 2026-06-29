@@ -13,9 +13,10 @@
     font-family:"Courier New",monospace; color:var(--ink); user-select:none;
   }
   #wrap { display:flex; align-items:flex-start; justify-content:center; gap:14px; }
+  #leftcol { display:flex; flex-direction:column; align-items:flex-start; width:600px; } /* canvas + hint + config, under the playfield */
   #play { position:relative; }
   canvas { display:block; image-rendering:pixelated; }
-  #hint { margin-top:12px; font-size:12px; letter-spacing:1px; color:#7d7d7d; }
+  #hint { margin-top:11px; font-size:12px; letter-spacing:1px; color:#7d7d7d; text-align:left; }
   #overlay {
     position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
     font-size:14px; letter-spacing:2px; color:var(--ink); pointer-events:none;
@@ -42,8 +43,8 @@
   #dbg .pr { margin:1px 0 0 12px; color:#6b6b6b; white-space:nowrap; }
   #dbg .bar { height:6px; background:var(--bg); border:1px solid var(--ink); overflow:hidden; margin:3px 0 2px 12px; width:calc(100% - 12px); }
   #dbg .bar i { display:block; height:100%; background:var(--ink); }
-  #cfg { margin-top:11px; font-size:11px; color:#7d7d7d;
-    display:flex; flex-wrap:wrap; justify-content:center; align-items:center; gap:6px 14px; }
+  #cfg { margin-top:9px; width:100%; font-size:11px; color:#7d7d7d;
+    display:flex; flex-wrap:wrap; justify-content:flex-start; align-items:center; gap:6px 14px; }
   #cfg .fld { display:inline-flex; align-items:center; gap:5px; }
   #cfg label { display:inline-flex; align-items:center; gap:5px; }
   #cfg input[type=text],#cfg input[type=password]{ font-size:11px; padding:2px 4px; border:1px solid #bdbdbd; background:var(--bg); color:var(--ink); }
@@ -97,18 +98,20 @@
     <button id="mode-compare" type="button">Comparison</button>
   </div>
   <div id="wrap">
-    <div id="play">
-      <canvas id="game" width="600" height="200"></canvas>
-      <div id="overlay"></div>
+    <div id="leftcol">
+      <div id="play">
+        <canvas id="game" width="600" height="200"></canvas>
+        <div id="overlay"></div>
+      </div>
+      <div id="hint">MOSAIC AI is NOT driving (mock) · SPACE = restart</div>
+      <div id="cfg">
+        <label><input type="checkbox" id="llm-real"> use real Cerebras</label>
+        <span class="fld">base <input type="text" id="llm-base" value="https://api.cerebras.ai/v1" size="20"></span>
+        <span class="fld">model <input type="text" id="llm-model" value="gemma-4-31b" size="9"></span>
+        <span class="fld">key <input type="password" id="llm-key" size="8"></span>
+      </div>
     </div>
     <div id="dbg"></div>
-  </div>
-  <div id="hint">MOSAIC AI is NOT driving (mock) · SPACE = restart</div>
-  <div id="cfg">
-    <label><input type="checkbox" id="llm-real"> use real Cerebras</label>
-    <span class="fld">base <input type="text" id="llm-base" value="https://api.cerebras.ai/v1" size="20"></span>
-    <span class="fld">model <input type="text" id="llm-model" value="gemma-4-31b" size="9"></span>
-    <span class="fld">key <input type="password" id="llm-key" size="8"></span>
   </div>
 
   <!-- Key popup shown when "use real Cerebras" is checked -->
