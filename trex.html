@@ -31,53 +31,13 @@
   #dbg .bar i { display:block; height:100%; background:#535353; }
   #cfg { margin-top:8px; font-size:11px; color:#9a9a9a; }
   #cfg input[type=text],#cfg input[type=password]{ font-size:11px; padding:1px 3px; }
-
-  /* MOSAIC loop diagram — strictly black & white, matches the game palette */
-  #stage { display:flex; align-items:flex-start; justify-content:center; gap:26px; }
-  #loop { flex:none; }
-  #loop .mbox rect { fill:var(--bg); stroke:var(--ink); stroke-width:1.5; }
-  #loop .mbox text { fill:var(--ink); font:10px "Courier New",monospace; }
-  #loop .mbox.active rect { fill:var(--ink); }     /* highlight = invert, never color */
-  #loop .mbox.active text { fill:var(--bg); }
-  #loop .flow { fill:none; stroke:var(--ink); stroke-width:1.5; }
-  #loop .cap  { fill:var(--ink); font:9px "Courier New",monospace; }
-  #loop-title { fill:var(--ink); font:bold 11px "Courier New",monospace; letter-spacing:1px; }
 </style>
 </head>
 <body>
-  <div id="stage">
-    <div id="wrap">
-      <canvas id="game" width="600" height="200"></canvas>
-      <div id="overlay"></div>
-      <div id="dbg"></div>
-    </div>
-    <!-- MOSAIC loop diagram (monochrome). Boxes invert when their stage fires. -->
-    <svg id="loop" width="300" height="322" viewBox="0 0 300 322" aria-label="MOSAIC loop">
-      <defs>
-        <marker id="ah" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
-          <path d="M0,0 L6,3 L0,6 Z" fill="#535353"/>
-        </marker>
-      </defs>
-      <text id="loop-title" x="12" y="13">MOSAIC LOOP</text>
-      <!-- 7 stacked boxes: x=12 w=236 h=32 step=40, first at y=20 -->
-      <g class="mbox" id="box-decision"><rect x="12" y="20"  width="236" height="32" rx="2"/><text x="22" y="40">Decision point</text></g>
-      <g class="mbox" id="box-stage1"><rect x="12" y="60"  width="236" height="32" rx="2"/><text x="22" y="80">Stage 1 — prediction (forward)</text></g>
-      <g class="mbox" id="box-stage4"><rect x="12" y="100" width="236" height="32" rx="2"/><text x="22" y="120">Stage 4 — command (inverse)</text></g>
-      <g class="mbox" id="box-exec"><rect x="12" y="140" width="236" height="32" rx="2"/><text x="22" y="160">Execution</text></g>
-      <g class="mbox" id="box-result"><rect x="12" y="180" width="236" height="32" rx="2"/><text x="22" y="200">Result point</text></g>
-      <g class="mbox" id="box-stage2"><rect x="12" y="220" width="236" height="32" rx="2"/><text x="22" y="240">Stage 2 — verify (squared error)</text></g>
-      <g class="mbox" id="box-stage3"><rect x="12" y="260" width="236" height="32" rx="2"/><text x="22" y="280">Stage 3 — responsibility (softmax)</text></g>
-      <!-- down connectors between consecutive boxes -->
-      <path class="flow" d="M130,52 V60"   marker-end="url(#ah)"/>
-      <path class="flow" d="M130,92 V100"  marker-end="url(#ah)"/>
-      <path class="flow" d="M130,132 V140" marker-end="url(#ah)"/>
-      <path class="flow" d="M130,172 V180" marker-end="url(#ah)"/>
-      <path class="flow" d="M130,212 V220" marker-end="url(#ah)"/>
-      <path class="flow" d="M130,252 V260" marker-end="url(#ah)"/>
-      <!-- feedback: Stage 3 -> Stage 4 (responsibility -> next command) -->
-      <path class="flow" d="M248,276 H272 V116 H250" marker-end="url(#ah)"/>
-      <text class="cap" x="287" y="196" transform="rotate(-90 287 196)" text-anchor="middle">responsibility &#8594; next command</text>
-    </svg>
+  <div id="wrap">
+    <canvas id="game" width="600" height="200"></canvas>
+    <div id="overlay"></div>
+    <div id="dbg"></div>
   </div>
   <div id="hint">MOSAIC AI is driving · SPACE = restart</div>
   <div id="cfg">
@@ -192,30 +152,11 @@ const mosaic = { respJump: 0.5, respRun: 0.5, last: null };
 
 // (2) Decision/result gating — one decision per obstacle, scored once.
 const decision = { active:false, obs:null, state:null, action:null,
-                   ready:false, executed:false, coinsAt:0, predJump:null, predRun:null };
+                   ready:false, coinsAt:0, predJump:null, predRun:null };
 function resetDecision() {
   decision.active = false; decision.obs = null; decision.state = null;
-  decision.action = null; decision.ready = false; decision.executed = false;
+  decision.action = null; decision.ready = false;
   decision.predJump = null; decision.predRun = null;
-}
-
-// --- Loop-diagram pulse sequencer (VISUALIZATION ONLY) ------------------
-// Lights one box at a time in arrival order so the loop visibly pulses,
-// even when several stages fire within one frame. Never touches game logic.
-const PULSE_MS = 190;
-let pulseQueue = [], pulseBusy = false;
-function pulse(name) {
-  if (typeof document === 'undefined') return;
-  pulseQueue.push(name);
-  if (pulseQueue.length > 14) pulseQueue.shift();   // drop backlog, never block
-  if (!pulseBusy) runPulse();
-}
-function runPulse() {
-  if (!pulseQueue.length) { pulseBusy = false; return; }
-  pulseBusy = true;
-  const el = document.getElementById('box-' + pulseQueue.shift());
-  if (el) el.classList.add('active');
-  setTimeout(() => { if (el) el.classList.remove('active'); setTimeout(runPulse, 45); }, PULSE_MS);
 }
 
 // --- (5) LLM seam: mock (rule-based) now, real Cerebras when toggled. ----
@@ -284,16 +225,14 @@ function decide(predJump, predRun) {
 
 // Decision point: fire ONE (async) decision for this obstacle.
 function startDecision(obs) {
-  decision.active = true; decision.obs = obs; decision.ready = false; decision.executed = false;
+  decision.active = true; decision.obs = obs; decision.ready = false;
   decision.state = getWorldState(); decision.coinsAt = G.coins;
   const st = decision.state;
-  pulse('stage1');                                              // Stage 1 — prediction (forward)
   Promise.all([predictExpert(st, 'jump'), predictExpert(st, 'run')]).then(([pj, pr]) => {
     if (!decision.active || decision.obs !== obs) return;        // obstacle changed; drop
     decision.predJump = pj; decision.predRun = pr;
     const cmd = decide(pj, pr);
     decision.action = cmd.action; decision.ready = true;
-    pulse('stage4');                                            // Stage 4 — command (inverse)
     mosaic.last = { front: st.front, state: st, predJump: pj, predRun: pr,
       respJump: mosaic.respJump, respRun: mosaic.respRun, jumpProb: cmd.jumpProb,
       command: cmd.action, result: mosaic.last ? mosaic.last.result : '—' };
@@ -312,11 +251,9 @@ function scoreResult(crashed) {
   const actual = actualOutcome(decision.action, decision.state.front, gotCoin, crashed);
   const errJ = sq(decision.predJump.safety - actual.safety) + sq(decision.predJump.reward - actual.reward);
   const errR = sq(decision.predRun.safety  - actual.safety) + sq(decision.predRun.reward  - actual.reward);
-  pulse('stage2');                                             // Stage 2 — verify (squared error)
   const wJ = Math.exp(-BETA * errJ), wR = Math.exp(-BETA * errR);
   const z = (wJ + wR) || 1;
   mosaic.respJump = wJ / z; mosaic.respRun = wR / z;
-  pulse('stage3');                                             // Stage 3 — responsibility (softmax)
   mosaic.last = { front: decision.state.front, state: decision.state,
     predJump: decision.predJump, predRun: decision.predRun,
     respJump: mosaic.respJump, respRun: mosaic.respRun, jumpProb: null,
@@ -330,24 +267,16 @@ function controlStep() {
   // RESULT POINT: the locked obstacle passed the dino -> score once, unlock.
   if (decision.active && decision.obs) {
     const o = decision.obs;
-    if (!obstacles.includes(o) || (o.x + o.w < dino.x)) {
-      pulse('result');                                          // Result point
-      scoreResult(false); resetDecision();
-    }
+    if (!obstacles.includes(o) || (o.x + o.w < dino.x)) { scoreResult(false); resetDecision(); }
   }
   // DECISION POINT: next obstacle first reaches the decision bucket (no re-deciding).
   if (!decision.active && nextObs && distBucket(obstacleDx(nextObs)) <= DECISION_BUCKET) {
-    pulse('decision');                                          // Decision point
     startDecision(nextObs);
   }
-  // EXECUTION: carry out the committed action when the obstacle is close.
-  if (decision.active && decision.ready && !decision.executed &&
-      obstacleDx(decision.obs) <= Math.max(50, G.speed * 15)) {
-    if (decision.action === 'jump') {
-      if (dino.onGround) { applyAction('jump'); decision.executed = true; pulse('exec'); }  // well-timed jump
-    } else {
-      decision.executed = true; pulse('exec');                  // "run" = no jump, still an executed choice
-    }
+  // EXECUTION: a committed JUMP fires when the obstacle is close (well-timed).
+  if (decision.active && decision.ready && decision.action === 'jump' &&
+      dino.onGround && obstacleDx(decision.obs) <= Math.max(50, G.speed * 15)) {
+    applyAction('jump');
   }
 }
 
@@ -555,7 +484,7 @@ function start() {
 }
 
 function gameOver() {
-  if (decision.active && decision.ready) { pulse('result'); scoreResult(true); }   // result point on collision
+  if (decision.active && decision.ready) scoreResult(true);   // result point on collision
   resetDecision();
   G.state = 'over';
   G.overAtLoop = G.loopT;
