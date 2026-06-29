@@ -211,9 +211,13 @@
           <span class="hint" id="m-info"></span>
         </div>
         <div class="hint" style="margin:2px 0 8px">
-          Three experts (same model, different system prompts) each propose an action +
-          predict the outcome <b>in parallel</b> every decision. Action = responsibility-weighted
-          vote; responsibilities shift toward whichever expert keeps predicting correctly.
+          Three experts (same model, different system prompts), each a forward+inverse
+          <b>pair</b>. Inverse = propose an action; forward = predict the next state for
+          <i>each</i> action. The executed action is the responsibility-weighted vote; then
+          every expert's forward model is scored on the <b>same executed action</b> and
+          responsibility λ = softmax(−error/σ²) flows to whoever predicts reality best.
+          The right column shows each expert's forward-prediction error (hover for the
+          running average that drives λ).
         </div>
         <div id="m-modules"></div>
         <pre id="m-log" class="mlog"></pre>
@@ -1475,24 +1479,34 @@ window.addEventListener('keydown', (ev) => {
    MOSAIC controller (Wolpert & Kawato 1998) over an LLM.
 
    N modules ("experts"), each the SAME model (gemma-4-31b on Cerebras) with a
-   DIFFERENT system prompt / personality. Every decision:
-     1. All modules run their INVERSE model in PARALLEL (Promise.all): each
-        proposes an action AND a forward PREDICTION of the outcome.
-     2. The chosen action is a responsibility-weighted vote over proposals.
-     3. After the action resolves we score each module's prediction against
-        what actually happened; responsibilities move (multiplicatively, like
-        MOSAIC's responsibility predictor) toward the experts that predict
-        best, then renormalize to sum to 1.
+   DIFFERENT system prompt / personality. Each module is a forward+inverse PAIR.
+   Every decision:
+     1. INVERSE model: every module proposes an action.
+     2. The EXECUTED action is the responsibility-weighted vote over those
+        proposals (λ-weighted).
+     3. FORWARD model: every module also predicts the NEXT state for the action
+        that will ACTUALLY execute (coin gained?, freeze?, resulting lane &
+        posture). Because all modules are scored on the SAME executed action,
+        every module's prediction is validated against the one reality that
+        unfolds — fixing the old bug where a module could only be checked on
+        its own (often un-executed) proposal.
+     4. After the tick resolves we compute each module's forward-prediction
+        ERROR vs the actual next state, fold it into a running (EMA) error that
+        PERSISTS across decisions and runs, and set responsibility
+        λ_i = softmax(-errEMA_i / σ²). Responsibility flows to whichever
+        forward model best predicts how the world actually changes — not to
+        whoever is most pessimistic.
 
    This NEVER touches game logic. It only writes to `pendingAction` (the same
    buffer the keyboard uses) — exactly through the existing agentStep seam.
    ========================================================================= */
 const MCFG = {
   settleTicks: 14,     // game ticks to wait before scoring a prediction
-  beta: 1.1,           // responsibility sharpening (higher = faster shifts)
-  respFloor: 0.02,     // minimum responsibility before renormalizing
+  fwdSigma2: 0.6,      // softmax temperature σ² in λ_i = softmax(-errEMA_i/σ²)
+  fwdErrEMA: 0.35,     // smoothing of the running forward-error (persists across runs)
+  fwdMaxErr: 4,        // max forward error (coin+freeze+lane+posture); a failed call = this
   temperature: 0.4,
-  maxTokens: 160,
+  maxTokens: 220,      // room for the per-action forward predictions
   minDecisionMs: 50,   // small breather between decisions
   autoRestartMs: 2500, // when AI is on, auto-restart after the timer ends
 };
@@ -1522,10 +1536,15 @@ const PERSONA_CORE =
   "Gold flags = coins (collect by being in their lane as they reach you; jumping still collects). " +
   "Hitting a hazard freezes you ~1s (costs time); it is not game over. Goal: maximise coins + distance in 60s.\n" +
   "The state text lists, per lane, the nearest thing ahead and how many tiles away, then your lane and posture.\n" +
+  "You are a forward+inverse PAIR. Do TWO things:\n" +
+  "  (1) INVERSE: choose ONE action to execute now.\n" +
+  "  (2) FORWARD: for EACH of the four actions, predict the outcome on the next step IF that action were the one executed:\n" +
+  "      coin = 1 if you'd collect a gold flag (else 0); freeze = true if you'd hit a hazard and freeze (else false).\n" +
   "Reply with ONLY a compact JSON object, no prose, no code fence:\n" +
-  '{"action":"left|right|jump|stay","predictCoin":0,"predictFreeze":false,"predict":"<=8 words"}\n' +
-  "predictCoin = 1 if you expect to collect a flag soon (else 0). " +
-  "predictFreeze = true if you expect to hit a hazard and freeze (else false).";
+  '{"action":"left|right|jump|stay","forward":{' +
+  '"left":{"coin":0,"freeze":false},"right":{"coin":0,"freeze":false},' +
+  '"jump":{"coin":0,"freeze":false},"stay":{"coin":0,"freeze":false}}}\n' +
+  "Predict each action HONESTLY from the state (this is your forward model), independent of which action you chose.";
 
 const MODULE_DEFS = [
   { id: 'greedy', name: 'Goldbeak', persona: 'coin-greedy',
@@ -1543,7 +1562,7 @@ const mosaic = {
   enabled: false,
   modules: MODULE_DEFS.map(d => ({
     ...d, resp: 1 / MODULE_DEFS.length,
-    action: 'stay', pred: null, matched: null, err: null, latency: 0, ok: true,
+    action: 'stay', fwd: null, matched: null, fwdErr: null, errEMA: 0, latency: 0, ok: true,
   })),
   decisions: 0,
   lastWinner: -1,
@@ -1596,6 +1615,12 @@ function tokPerSec(usage, timeInfo, latencyMs) {
 }
 
 const ACTIONS = ['left', 'right', 'jump', 'stay'];
+// A neutral forward map (predict nothing) used as the fallback for failed calls.
+function emptyForward() {
+  const f = {};
+  for (const a of ACTIONS) f[a] = { coin: 0, freeze: false };
+  return f;
+}
 function parseModuleReply(text) {
   let t = String(text || '').trim();
   // tolerate code fences / stray prose around the JSON
@@ -1606,12 +1631,14 @@ function parseModuleReply(text) {
   let o;
   try { o = JSON.parse(t); } catch (e) { return null; }
   const action = ACTIONS.includes(o.action) ? o.action : 'stay';
-  return {
-    action,
-    coin: o.predictCoin ? 1 : 0,
-    freeze: !!o.predictFreeze,
-    note: String(o.predict || '').slice(0, 40),
-  };
+  // INVERSE = action; FORWARD = per-action {coin,freeze} next-state prediction.
+  const src = (o.forward && typeof o.forward === 'object') ? o.forward : {};
+  const fwd = {};
+  for (const a of ACTIONS) {
+    const p = src[a] || {};
+    fwd[a] = { coin: p.coin ? 1 : 0, freeze: !!p.freeze };
+  }
+  return { action, fwd };
 }
 
 async function callModule(m, conn, stateText, onErr) {
@@ -1625,12 +1652,12 @@ async function callModule(m, conn, stateText, onErr) {
     m.compTime = (timeInfo && (timeInfo.completion_time || timeInfo.total_time)) || (m.latency / 1000);
     m.tokps = tokPerSec(usage, timeInfo, m.latency);
     const p = parseModuleReply(content);
-    if (!p) { m.ok = false; m.action = 'stay'; m.pred = { action: 'stay', coin: 0, freeze: false, note: '(parse fail)' }; return; }
-    m.ok = true; m.action = p.action; m.pred = p;
+    if (!p) { m.ok = false; m.action = 'stay'; m.fwd = emptyForward(); return; }
+    m.ok = true; m.action = p.action; m.fwd = p.fwd;
   } catch (err) {
     m.latency = Math.round(nowMs() - t0);
     m.ok = false; m.action = 'stay';
-    m.pred = { action: 'stay', coin: 0, freeze: false, note: '(error)' };
+    m.fwd = emptyForward();
     m.tokps = 0; m.compTokens = 0; m.compTime = 0;
     if (onErr) onErr(err); else mosaic.lastError = String(err.message || err).slice(0, 160);
   }
@@ -1649,23 +1676,59 @@ function chooseAction(modules) {
   return { action: best, winnerIdx, tally };
 }
 
-// --- Pure: score predictions vs. reality, update + renormalize responsibilities.
-function scorePredictions(modules, actual, cfg = MCFG) {
-  for (const m of modules) {
-    const p = m.pred || { coin: 0, freeze: false };
-    let err = 0;
-    if ((p.coin > 0) !== (actual.coinGain > 0)) err++;
-    if (!!p.freeze !== !!actual.freeze) err++;
-    if (m.ok === false) err = Math.max(err, 1); // a failed call can't have predicted well
-    m.err = err;
+// --- Forward model: deterministic kinematics shared by every module. -------
+// Resulting lane is fully determined by the executed action (the world applies
+// it before any collision/freeze), so it is the same ground truth for all
+// modules; only coin/freeze come from each module's learned forward prediction.
+function predictNextLane(lane, action) {
+  if (action === 'left')  return Math.max(0, lane - 1);
+  if (action === 'right') return Math.min(CONFIG.lanes - 1, lane + 1);
+  return lane;
+}
+
+// Forward-prediction error of module m for the EXECUTED action vs the actual
+// next state. All modules are scored on the SAME executed action — that is the
+// fix: every module's forward model is validated against the one reality that
+// unfolded. Error counts mismatches in {coin, freeze, resulting lane, posture}.
+function forwardError(m, executedAction, beforeLane, actual, cfg = MCFG) {
+  if (!m.ok || !m.fwd) return cfg.fwdMaxErr; // a failed call predicted nothing
+  const f = m.fwd[executedAction] || { coin: 0, freeze: false };
+  const predLane = predictNextLane(beforeLane, executedAction);
+  const predAir = executedAction === 'jump';
+  let err = 0;
+  if ((f.coin > 0) !== (actual.coinGain > 0)) err++;
+  if (!!f.freeze !== !!actual.freeze) err++;
+  if (predLane !== actual.lane) err++;
+  if (predAir !== !!actual.airborne) err++;
+  return err;
+}
+
+// --- MOSAIC responsibility update (Wolpert & Kawato 1998). -------------------
+// Score each module's forward model on the executed action, fold the error into
+// a running EMA that PERSISTS across decisions/runs, then set
+//   λ_i = softmax(-errEMA_i / σ²)
+// over the full committee. `scored` is the subset evaluated this decision (all
+// modules in the single panel; the evaluated subset in comparison mode). Modules
+// not scored keep their persisted errEMA, so they retain a sensible λ.
+function updateResponsibility(allModules, scored, beforeLane, actual, cfg = MCFG) {
+  const inSet = new Set(scored);
+  for (const m of allModules) {
+    if (!inSet.has(m)) { m.matched = null; continue; }
+    const err = forwardError(m, actual.action, beforeLane, actual, cfg);
+    m.fwdErr = err;
+    m.errEMA = (typeof m.errEMA === 'number')
+      ? (1 - cfg.fwdErrEMA) * m.errEMA + cfg.fwdErrEMA * err
+      : err;
     m.matched = err === 0;
-    m.resp *= Math.exp(-cfg.beta * err); // MOSAIC-style multiplicative update
   }
-  // floor + renormalize to sum to 1
-  let sum = 0;
-  for (const m of modules) { if (m.resp < cfg.respFloor) m.resp = cfg.respFloor; sum += m.resp; }
-  if (sum > 0) for (const m of modules) m.resp /= sum;
-  return modules;
+  let sum = 0; const ex = [];
+  for (const m of allModules) {
+    const e = (typeof m.errEMA === 'number') ? m.errEMA : cfg.fwdMaxErr;
+    const v = Math.exp(-e / cfg.fwdSigma2);
+    ex.push(v); sum += v;
+  }
+  if (sum > 0) allModules.forEach((m, i) => { m.resp = ex[i] / sum; });
+  return allModules;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -1706,10 +1769,12 @@ async function mosaicLoop() {
     const before = { coins: game.coins, lane: game.lane, tick: game.tick, frozen: game.freezeT > 0 };
     const stateText = game.lastState || encodeState(game);
 
-    // 1) PARALLEL inverse+prediction for all modules (the Cerebras-speed point).
+    // 1) INVERSE (propose) + FORWARD (per-action prediction) for all modules,
+    //    in PARALLEL (the Cerebras-speed point).
     await Promise.all(mosaic.modules.map(m => callModule(m, conn, stateText)));
 
-    // 2) Responsibility-weighted vote -> action applied via the agentStep seam.
+    // 2) Responsibility-weighted vote over the INVERSE proposals -> executed
+    //    action, applied via the agentStep seam.
     const { action, winnerIdx } = chooseAction(mosaic.modules);
     pendingAction = action;
     mosaic.lastWinner = winnerIdx;
@@ -1717,21 +1782,28 @@ async function mosaicLoop() {
     renderModules(winnerIdx, action);
     logDecision(action, winnerIdx);
 
-    // 3) Wait for the action to resolve, sampling whether a freeze occurred.
-    let sawFreeze = false;
+    // 3) Wait for the action to resolve, sampling whether a freeze / airborne
+    //    state occurred (the actual next state for the FORWARD scoring).
+    let sawFreeze = false, sawAir = false;
     const target = game.tick + MCFG.settleTicks;
     while (game.tick < target && mosaic.enabled && !game.over && !game.paused) {
       if (!before.frozen && game.freezeT > 0) sawFreeze = true;
+      if (isAirborne(game)) sawAir = true;
       await sleep(CONFIG.tickMs);
     }
     if (!before.frozen && game.freezeT > 0) sawFreeze = true;
+    if (isAirborne(game)) sawAir = true;
 
+    // 4) Forward-prediction error of EVERY module on the EXECUTED action ->
+    //    running responsibility update (λ = softmax(-errEMA/σ²)).
     const actual = {
+      action,
       coinGain: game.coins - before.coins,
       freeze: sawFreeze,
-      laneChanged: game.lane !== before.lane,
+      lane: game.lane,
+      airborne: sawAir,
     };
-    scorePredictions(mosaic.modules, actual);
+    updateResponsibility(mosaic.modules, mosaic.modules, before.lane, actual);
     renderModules(mosaic.lastWinner, action, actual);
 
     if (mosaic.lastError) { setStatus('merr', 'error'); }
@@ -1791,17 +1863,23 @@ function renderModules(winnerIdx, action, actual) {
     if (bar) bar.style.width = (m.resp * 100).toFixed(1) + '%';
     if (pct) pct.textContent = (m.resp * 100).toFixed(0) + '%';
     if (mt) {
-      if (m.matched === null) { mt.className = 'mmatch na'; mt.textContent = '—'; }
-      else if (m.matched) { mt.className = 'mmatch ok'; mt.textContent = '✓ hit'; }
-      else { mt.className = 'mmatch no'; mt.textContent = '✗ miss'; }
+      // Forward-prediction error this decision + the running EMA that drives λ.
+      if (m.fwdErr == null) { mt.className = 'mmatch na'; mt.textContent = '—'; }
+      else {
+        mt.className = 'mmatch ' + (m.fwdErr === 0 ? 'ok' : 'no');
+        mt.textContent = 'e' + m.fwdErr + ' μ' + (m.errEMA || 0).toFixed(1);
+        mt.title = 'forward-error this step=' + m.fwdErr + ', running μ=' + (m.errEMA || 0).toFixed(2);
+      }
     }
   });
 }
 function logDecision(action, winnerIdx) {
   const w = mosaic.modules[winnerIdx];
-  const parts = mosaic.modules.map(m =>
-    `${m.name}:${m.action}${m.pred && m.pred.coin ? '$' : ''}${m.pred && m.pred.freeze ? '!' : ''}` +
-    `(${(m.resp * 100).toFixed(0)}%${m.latency ? ' ' + m.latency + 'ms' : ''})`);
+  const parts = mosaic.modules.map(m => {
+    const f = (m.fwd && m.fwd[action]) || { coin: 0, freeze: false };
+    return `${m.name}:${m.action}${f.coin ? '$' : ''}${f.freeze ? '!' : ''}` +
+      `(λ${(m.resp * 100).toFixed(0)}%${m.fwdErr != null ? ' e' + m.fwdErr : ''})`;
+  });
   logLine(`#${mosaic.decisions} -> ${action.toUpperCase()} [win:${w ? w.name : '?'}]  ` + parts.join('  '));
 }
 function logLine(s) {
@@ -1869,15 +1947,16 @@ if (typeof document !== 'undefined') {
 const CMP = {
   budgetMs: 450,      // LEFT per-decision wall-clock budget (tunable)
   settleTicks: MCFG.settleTicks,
-  beta: MCFG.beta,
-  respFloor: MCFG.respFloor,
+  fwdSigma2: MCFG.fwdSigma2,
+  fwdErrEMA: MCFG.fwdErrEMA,
+  fwdMaxErr: MCFG.fwdMaxErr,
   minDecisionMs: 30,
 };
 
 function makeModuleSet() {
   return MODULE_DEFS.map(d => ({
     ...d, resp: 1 / MODULE_DEFS.length,
-    action: 'stay', pred: null, matched: null, err: null, latency: 0, ok: true,
+    action: 'stay', fwd: null, matched: null, fwdErr: null, errEMA: 0, latency: 0, ok: true,
     tokps: 0, compTokens: 0, compTime: 0,
   }));
 }
@@ -1906,24 +1985,11 @@ function makeController(side, mode) {
   };
 }
 
-// Score only the modules actually evaluated this decision; renormalize over
-// the full set so weight still sums to 1 (un-evaluated modules keep weight).
-function scoreSubset(allModules, evaluated, actual, cfg) {
-  const evalSet = new Set(evaluated);
-  for (const m of allModules) {
-    if (!evalSet.has(m)) { m.matched = null; continue; }
-    const p = m.pred || { coin: 0, freeze: false };
-    let err = 0;
-    if ((p.coin > 0) !== (actual.coinGain > 0)) err++;
-    if (!!p.freeze !== !!actual.freeze) err++;
-    if (m.ok === false) err = Math.max(err, 1);
-    m.err = err; m.matched = err === 0;
-    m.resp *= Math.exp(-cfg.beta * err);
-  }
-  let sum = 0;
-  for (const m of allModules) { if (m.resp < cfg.respFloor) m.resp = cfg.respFloor; sum += m.resp; }
-  if (sum > 0) for (const m of allModules) m.resp /= sum;
-}
+// Comparison-mode scoring is the SAME forward-model responsibility update used
+// by the single panel — only the EVALUATED subset (those actually called this
+// decision) is scored; un-evaluated modules keep their persisted errEMA and λ.
+// (updateResponsibility handles both the per-module forward error and the
+//  softmax over the full committee.)
 
 // LEFT: sequential evaluation under a per-decision wall-clock budget.
 // Calls modules one at a time; after each returns, stop starting NEW calls
@@ -1958,7 +2024,7 @@ async function controllerLoop(ctrl, getGame) {
     if (!g || g.over) break;
     if (g.paused) { await sleep(120); continue; }
 
-    const before = { coins: g.coins, tick: g.tick, frozen: g.freezeT > 0 };
+    const before = { coins: g.coins, lane: g.lane, tick: g.tick, frozen: g.freezeT > 0 };
     const stateText = g.lastState || encodeState(g);
     ctrl.lastError = ''; // clear; repopulated by onErr if a call fails this decision
 
@@ -1982,7 +2048,7 @@ async function controllerLoop(ctrl, getGame) {
     ctrl.aggTokps = time > 0 ? toks / time
       : (voters.length ? voters.reduce((s, m) => s + (m.tokps || 0), 0) / voters.length : 0);
 
-    // Decision = responsibility-weighted vote over the valid voters.
+    // Decision = responsibility-weighted vote over the valid INVERSE proposals.
     const { action, winnerIdx } = voters.length
       ? chooseActionAmong(ctrl.modules, voters)
       : { action: 'stay', winnerIdx: -1 };
@@ -1995,16 +2061,19 @@ async function controllerLoop(ctrl, getGame) {
 
     renderCmpSide(ctrl);
 
-    // Settle, then score predictions of the evaluated modules.
-    let sawFreeze = false;
+    // Settle, then score the FORWARD models of the evaluated modules on the
+    // EXECUTED action (sampling the actual next state: freeze / airborne).
+    let sawFreeze = false, sawAir = false;
     const target = g.tick + CMP.settleTicks;
     while (getGame() === g && g.tick < target && cmp.active && !g.over && !g.paused) {
       if (!before.frozen && g.freezeT > 0) sawFreeze = true;
+      if (isAirborne(g)) sawAir = true;
       await sleep(CONFIG.tickMs);
     }
     if (!before.frozen && g.freezeT > 0) sawFreeze = true;
-    const actual = { coinGain: g.coins - before.coins, freeze: sawFreeze };
-    scoreSubset(ctrl.modules, evaluated, actual, CMP);
+    if (isAirborne(g)) sawAir = true;
+    const actual = { action, coinGain: g.coins - before.coins, freeze: sawFreeze, lane: g.lane, airborne: sawAir };
+    updateResponsibility(ctrl.modules, evaluated, before.lane, actual, CMP);
     renderCmpSide(ctrl);
     // Pace decisions: hold the last chosen action until the decision interval
     // elapses (game time), so both controllers together stay under the limit.
@@ -2100,12 +2169,15 @@ function renderCmpSide(ctrl) {
     const bar = document.getElementById('cmbar-' + side + '-' + i);
     const mt = document.getElementById('cmmatch-' + side + '-' + i);
     if (act) act.textContent = evaluated ? (ACTION_GLYPH[m.action] || m.action) : 'skip';
-    if (bar) bar.style.width = (m.resp * 100).toFixed(1) + '%';
+    if (bar) bar.style.width = (m.resp * 100).toFixed(1) + '%'; // responsibility λ
     if (mt) {
-      if (!evaluated) { mt.className = 'cmmatch na'; mt.textContent = '–'; }
-      else if (m.matched === null) { mt.className = 'cmmatch na'; mt.textContent = '?'; }
-      else if (m.matched) { mt.className = 'cmmatch ok'; mt.textContent = '✓'; }
-      else { mt.className = 'cmmatch no'; mt.textContent = '✗'; }
+      // Forward-prediction error (running EMA in the tooltip).
+      if (!evaluated || m.fwdErr == null) { mt.className = 'cmmatch na'; mt.textContent = evaluated ? '?' : '–'; mt.title = ''; }
+      else {
+        mt.className = 'cmmatch ' + (m.fwdErr === 0 ? 'ok' : 'no');
+        mt.textContent = 'e' + m.fwdErr;
+        mt.title = 'forward-error=' + m.fwdErr + ', running μ=' + (m.errEMA || 0).toFixed(2);
+      }
     }
   });
 }
@@ -2185,8 +2257,9 @@ function drawMiniGame(c, g, frozenLabel) {
 // Test hooks (used by the headless harness; no effect in the browser).
 if (typeof window !== 'undefined') {
   window.MOSAIC = {
-    mosaic, chooseAction, scorePredictions, parseModuleReply, callModule, MCFG,
-    chooseActionAmong, scoreSubset, evalSequential, evalParallel, makeModuleSet, CMP,
+    mosaic, chooseAction, updateResponsibility, forwardError, predictNextLane,
+    parseModuleReply, emptyForward, callModule, MCFG,
+    chooseActionAmong, evalSequential, evalParallel, makeModuleSet, CMP,
     makeController, stepCmpGame, drawMiniGame,
   };
 }
