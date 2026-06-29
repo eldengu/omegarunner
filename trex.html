@@ -20,15 +20,15 @@
     font-size:14px; letter-spacing:2px; color:var(--ink); pointer-events:none;
   }
   #dbg {
-    position:absolute; top:6px; right:6px; width:184px; padding:6px 8px;
-    background:rgba(255,255,255,0.82); border:1px solid #e2e2e2; border-radius:4px;
-    font-size:10px; line-height:1.45; color:var(--ink); text-align:left;
+    position:absolute; top:6px; right:6px; width:200px; padding:6px 8px;
+    background:rgba(255,255,255,0.9); border:1px solid var(--ink); border-radius:4px;
+    font-size:10px; line-height:1.5; color:var(--ink); text-align:left;
     pointer-events:none; letter-spacing:0;
   }
   #dbg b { color:#222; }
-  #dbg hr { border:0; border-top:1px solid #e2e2e2; margin:4px 0; }
-  #dbg .bar { height:5px; background:#e2e2e2; border-radius:3px; overflow:hidden; margin:2px 0; }
-  #dbg .bar i { display:block; height:100%; background:#535353; }
+  #dbg hr { border:0; border-top:1px solid var(--ink); margin:4px 0; }
+  #dbg .bar { height:6px; background:var(--bg); border:1px solid var(--ink); overflow:hidden; margin:2px 0 4px; }
+  #dbg .bar i { display:block; height:100%; background:var(--ink); }
   #cfg { margin-top:8px; font-size:11px; color:#9a9a9a; }
   #cfg input[type=text],#cfg input[type=password]{ font-size:11px; padding:1px 3px; }
 
@@ -320,8 +320,9 @@ function startDecision(obs) {
     decision.preds = preds;
     const cmd = decide(preds, mosaic.resp);
     decision.action = cmd.action; decision.ready = true;
-    mosaic.last = { front: st.front, preds, resp: Object.assign({}, mosaic.resp),
-      command: cmd.action, result: mosaic.last ? mosaic.last.result : '—' };
+    // display snapshot (panel reads this; no effect on the math)
+    mosaic.last = { front: st.front, coin: st.coin_ahead, preds, resp: Object.assign({}, mosaic.resp),
+      command: cmd.action, actual: null };
   });
 }
 
@@ -345,10 +346,10 @@ function scoreResult(crashed) {
     errs[e.id] = err; w[e.id] = Math.exp(-BETA * err); z += w[e.id];           // stage 3 (softmax)
   }
   if (z > 0) for (const e of experts) mosaic.resp[e.id] = w[e.id] / z;
-  mosaic.last = { front: decision.state.front, preds: decision.preds,
+  // display snapshot for the experts panel — plain outcome, NO error/softmax shown.
+  mosaic.last = { front: decision.state.front, coin: decision.state.coin_ahead, preds: decision.preds,
     resp: Object.assign({}, mosaic.resp), command: decision.action,
-    result: (crashed ? 'CRASH' : 'PASS') + (gotCoin ? ' +coin' : '') +
-            ' (' + experts.map(e => e.id[0] + ':' + errs[e.id]).join(' ') + ')' };
+    actual: { crashed: !!crashed, gotCoin: gotCoin } };
 }
 
 // Per-frame control seam (replaces the per-frame keyboard decide()).
@@ -547,31 +548,45 @@ function drawCloud(x,y) {
   cx.restore();
 }
 
-// --- (6) On-screen debug overlay (top-right): state, predictions, responsibilities, command.
+// --- (6) Experts panel (top-right): each expert's plain-language prediction,
+// the actual result beside it once known (✓/✗), and a trust (responsibility)
+// bar that visibly shifts to whoever was right. No error/softmax numbers.
 function drawDebug() {
   const el = document.getElementById('dbg');
   if (!el) return;
   const live = getWorldState();
   const L = mosaic.last;
   const pct = x => (x * 100).toFixed(0) + '%';
-  const f = p => p ? (p.sWord + '/' + p.rWord) : '?';   // safety / reward words
-  let html = '<b>MOSAIC control</b>';
-  html += '<div class="row">front: <b>' + live.front + '</b></div>';
-  html += '<div class="row">bucket ' + live.dist_bucket + ' · coin ' + (live.coin_ahead ? 'Y' : 'N') + '</div>';
-  // N-way responsibilities (one bar per expert) — loops over `experts`.
+  // plain words for one expert's forward prediction
+  const predWords = p => p ? ('predicts ' + (p.safety > 0 ? 'SAFE ' : 'CRASH') + ' · coin:' + (p.reward > 0 ? 'YES' : 'NO')) : 'predicts —';
+  // ✓/✗ for this expert's SAFE/CRASH call vs the actual outcome (plain right/wrong).
+  // (Trust/responsibility — the bar — reflects the full prediction; this glyph is
+  //  the headline safe-vs-crash verdict, matching "actual: SAFE ✓ / CRASH ✗".)
+  const verdict = (p, a) => {
+    if (!a || !p) return '';
+    return ((p.safety > 0) === (!a.crashed)) ? ' ✓' : ' ✗';
+  };
+  const a = L ? L.actual : null;
+  const sitFront = L ? L.front : live.front;          // describe the DECISION being shown
+  const sitCoin  = L ? L.coin : live.coin_ahead;
+  let html = '<b>EXPERTS</b>';
+  html += '<div class="row">situation: <b>' + sitFront + '</b>' + (sitCoin ? ' · coin ahead' : '') + '</div>';
+  if (L && a) html += '<div class="row">actual: <b>' + (a.crashed ? 'CRASH' : 'SAFE') + (a.gotCoin ? ' +coin' : '') + '</b></div>';
+  else        html += '<div class="row" style="color:#9a9a9a">…deciding (waiting for result)</div>';
+  html += '<div class="row" style="color:#9a9a9a">approaching: ' + live.front + '</div>';
+  html += '<hr>';
+  // one block per expert: name+verdict, plain prediction, trust bar (live resp)
   for (const e of experts) {
+    const p = L && L.preds ? L.preds[e.id] : null;
     const r = mosaic.resp[e.id] || 0;
-    html += '<div class="row">resp ' + e.id + ' <b>' + pct(r) + '</b></div>';
+    const win = L && L.command === e.action;
+    html += '<div class="row"><b>' + (win ? '▶ ' : '') + e.id.toUpperCase() + '</b>' +
+            '<span style="float:right">' + pct(r) + verdict(p, a) + '</span></div>';
+    html += '<div class="row" style="color:#5b5b5b">' + predWords(p) + '</div>';
     html += '<div class="bar"><i style="width:' + pct(r) + '"></i></div>';
   }
-  if (L) {
-    html += '<hr>last decision @ <b>' + L.front + '</b>';
-    for (const e of experts) {
-      html += '<div class="row">' + e.id + ' exp (s/r): ' + f(L.preds && L.preds[e.id]) + '</div>';
-    }
-    html += '<div class="row">command: <b>' + (L.command || '?').toUpperCase() + '</b></div>';
-    html += '<div class="row">result: ' + (L.result || '—') + '</div>';
-  }
+  html += '<hr>';
+  if (L) html += '<div class="row">command: <b>' + (L.command || '?').toUpperCase() + '</b></div>';
   const _m = llmMode();
   const _lbl = _m === 'cerebras' ? 'Cerebras' : _m === 'mock-no-key' ? 'mock (no key)' : 'mock';
   html += '<div class="row" style="color:#9a9a9a">LLM: ' + _lbl + '</div>';
