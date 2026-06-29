@@ -12,16 +12,18 @@
     display:flex; flex-direction:column; align-items:center; justify-content:center;
     font-family:"Courier New",monospace; color:var(--ink); user-select:none;
   }
-  #wrap { position:relative; }
+  #wrap { display:flex; align-items:flex-start; justify-content:center; gap:14px; }
+  #play { position:relative; }
   canvas { display:block; image-rendering:pixelated; }
   #hint { margin-top:10px; font-size:12px; letter-spacing:1px; color:#9a9a9a; }
   #overlay {
     position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
     font-size:14px; letter-spacing:2px; color:var(--ink); pointer-events:none;
   }
+  /* EXPERTS panel — static side column to the RIGHT of the canvas (no overlap) */
   #dbg {
-    position:absolute; top:6px; right:6px; width:200px; padding:6px 8px;
-    background:rgba(255,255,255,0.9); border:1px solid var(--ink); border-radius:4px;
+    flex:none; align-self:flex-start; width:200px; padding:6px 8px;
+    background:var(--bg); border:1px solid var(--ink); border-radius:4px;
     font-size:10px; line-height:1.5; color:var(--ink); text-align:left;
     pointer-events:none; letter-spacing:0;
   }
@@ -76,8 +78,10 @@
     <button id="mode-compare" type="button">Comparison</button>
   </div>
   <div id="wrap">
-    <canvas id="game" width="600" height="200"></canvas>
-    <div id="overlay"></div>
+    <div id="play">
+      <canvas id="game" width="600" height="200"></canvas>
+      <div id="overlay"></div>
+    </div>
     <div id="dbg"></div>
   </div>
   <div id="hint">MOSAIC AI is NOT driving (mock) · SPACE = restart</div>
