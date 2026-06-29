@@ -53,6 +53,21 @@
   #cmp-pace button.on { background:var(--ink); color:var(--bg); }
   .cmp-log { margin-top:5px; font-size:10px; line-height:1.55; min-height:78px; color:var(--ink); text-align:left; width:320px; }
   #cmp-verdict { max-width:620px; font-size:12px; line-height:1.55; min-height:36px; text-align:center; margin-top:4px; }
+
+  /* real-Cerebras key modal — strictly monochrome */
+  #keymodal { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(255,255,255,0.72); z-index:50; }
+  #keymodal.hidden { display:none; }
+  #keymodal .box { background:var(--bg); border:2px solid var(--ink); border-radius:4px;
+    padding:18px 20px; width:330px; text-align:left; font-family:"Courier New",monospace; color:var(--ink); }
+  #keymodal h3 { font-size:13px; font-weight:700; letter-spacing:1px; margin-bottom:10px; }
+  #keymodal p { font-size:11px; line-height:1.5; color:#6b6b6b; margin-bottom:10px; }
+  #keymodal input { width:100%; box-sizing:border-box; font-family:"Courier New",monospace; font-size:12px;
+    padding:5px 7px; border:1px solid var(--ink); background:var(--bg); color:var(--ink); margin-bottom:14px; }
+  #keymodal .btns { text-align:right; }
+  #keymodal button { font-family:"Courier New",monospace; font-size:12px; letter-spacing:1px; color:var(--ink);
+    background:var(--bg); border:1px solid var(--ink); padding:3px 14px; cursor:pointer; margin-left:6px; }
+  #keymodal button.primary { background:var(--ink); color:var(--bg); }
 </style>
 </head>
 <body>
@@ -65,12 +80,26 @@
     <div id="overlay"></div>
     <div id="dbg"></div>
   </div>
-  <div id="hint">MOSAIC AI is driving · SPACE = restart</div>
+  <div id="hint">MOSAIC AI is NOT driving (mock) · SPACE = restart</div>
   <div id="cfg">
     <label><input type="checkbox" id="llm-real"> use real Cerebras</label>
     &nbsp; base <input type="text" id="llm-base" value="https://api.cerebras.ai/v1" size="20">
     model <input type="text" id="llm-model" value="gemma-4-31b" size="9">
     key <input type="password" id="llm-key" size="8">
+  </div>
+
+  <!-- Key popup shown when "use real Cerebras" is checked -->
+  <div id="keymodal" class="hidden">
+    <div class="box">
+      <h3>USE REAL CEREBRAS</h3>
+      <p>Enter your Cerebras API key. OK starts a fresh run driven by the real model;
+         Cancel (or an empty key) stays on the mock.</p>
+      <input type="password" id="keymodal-input" placeholder="sk-..." autocomplete="off" spellcheck="false">
+      <div class="btns">
+        <button type="button" id="keymodal-cancel">CANCEL</button>
+        <button type="button" id="keymodal-ok" class="primary">OK</button>
+      </div>
+    </div>
   </div>
 
   <!-- Comparison mode: same seeded course, two latencies. Throughput, not survival. -->
@@ -853,6 +882,7 @@ function loop() {
     if (G.state === 'running') update();
     draw();
     drawDebug();
+    updateHint();   // keep the driving hint consistent with llmMode() every frame
     if (G.state === 'ready') start();                                            // AI auto-starts
     else if (G.state === 'over' && G.loopT - (G.overAtLoop || 0) > 45) start();   // auto-restart to keep learning
   }
@@ -887,8 +917,51 @@ document.addEventListener('keydown', e => {
 cv.addEventListener('pointerdown', () => {
   if (G.state === 'ready' || G.state === 'over') start();
 });
+// --- Driving hint + real-Cerebras key modal (single source of truth: llmMode) ---
+function updateHint() {
+  const el = document.getElementById('hint');
+  if (!el) return;
+  el.textContent = (llmMode() === 'cerebras')
+    ? 'MOSAIC AI is driving (Cerebras) · SPACE = restart'
+    : 'MOSAIC AI is NOT driving (mock) · SPACE = restart';
+}
 const realChk = document.getElementById('llm-real');
-if (realChk) realChk.addEventListener('change', () => { useRealLLM = realChk.checked; });
+function openKeyModal() {
+  const m = document.getElementById('keymodal'); if (!m) return;
+  const inp = document.getElementById('keymodal-input');
+  if (inp) { inp.value = (document.getElementById('llm-key') || {}).value || ''; }
+  m.classList.remove('hidden');
+  if (inp && inp.focus) inp.focus();
+}
+function closeKeyModal() { const m = document.getElementById('keymodal'); if (m) m.classList.add('hidden'); }
+function keyModalOK() {
+  const key = (((document.getElementById('keymodal-input') || {}).value) || '').trim();
+  if (!key) { keyModalCancel(); return; }                 // empty key -> treat as cancel
+  const kf = document.getElementById('llm-key'); if (kf) kf.value = key;
+  useRealLLM = true; if (realChk) realChk.checked = true;  // commit real mode
+  closeKeyModal(); updateHint();
+  start();                                                 // fresh run under real Cerebras
+}
+function keyModalCancel() {
+  if (realChk) realChk.checked = false; useRealLLM = false; // revert to mock
+  closeKeyModal(); updateHint();
+}
+if (realChk) realChk.addEventListener('change', () => {
+  if (realChk.checked) openKeyModal();                     // checking -> ask for a key first
+  else { useRealLLM = false; updateHint(); }               // unchecking -> back to mock
+});
+const _kOk = document.getElementById('keymodal-ok');
+const _kCancel = document.getElementById('keymodal-cancel');
+const _kInput = document.getElementById('keymodal-input');
+const _kModal = document.getElementById('keymodal');
+if (_kOk) _kOk.addEventListener('click', keyModalOK);
+if (_kCancel) _kCancel.addEventListener('click', keyModalCancel);
+if (_kInput) _kInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); keyModalOK(); }
+  else if (e.key === 'Escape') { e.preventDefault(); keyModalCancel(); }
+});
+if (_kModal) _kModal.addEventListener('click', e => { if (e.target === _kModal) keyModalCancel(); });
+updateHint();   // on load: mock -> "NOT driving"
 
 // Mode toggle (single play <-> comparison). Default single.
 const msBtn = document.getElementById('mode-single');
