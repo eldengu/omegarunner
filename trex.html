@@ -15,24 +15,38 @@
   #wrap { display:flex; align-items:flex-start; justify-content:center; gap:14px; }
   #play { position:relative; }
   canvas { display:block; image-rendering:pixelated; }
-  #hint { margin-top:10px; font-size:12px; letter-spacing:1px; color:#9a9a9a; }
+  #hint { margin-top:12px; font-size:12px; letter-spacing:1px; color:#7d7d7d; }
   #overlay {
     position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
     font-size:14px; letter-spacing:2px; color:var(--ink); pointer-events:none;
   }
-  /* EXPERTS panel — static side column to the RIGHT of the canvas (no overlap) */
+  /* EXPERTS panel — tidy static side column to the RIGHT of the canvas (no overlap) */
   #dbg {
-    flex:none; align-self:flex-start; width:200px; padding:6px 8px;
+    flex:none; align-self:flex-start; width:226px; padding:9px 11px;
     background:var(--bg); border:1px solid var(--ink); border-radius:4px;
-    font-size:10px; line-height:1.5; color:var(--ink); text-align:left;
-    pointer-events:none; letter-spacing:0;
+    font-family:"Courier New",monospace; font-size:10.5px; line-height:1.5; color:var(--ink);
+    text-align:left; pointer-events:none; letter-spacing:0;
   }
   #dbg b { color:#222; }
-  #dbg hr { border:0; border-top:1px solid var(--ink); margin:4px 0; }
-  #dbg .bar { height:6px; background:var(--bg); border:1px solid var(--ink); overflow:hidden; margin:2px 0 4px; }
+  #dbg .dim { color:#9a9a9a; }
+  #dbg .title { font-weight:700; letter-spacing:2px; margin-bottom:6px; }
+  #dbg hr { border:0; border-top:1px solid #d6d6d6; margin:7px 0; }
+  #dbg .sit, #dbg .res, #dbg .legend, #dbg .next, #dbg .llm { margin:1px 0; white-space:nowrap; }
+  #dbg .sit .k { color:#9a9a9a; }
+  #dbg .erow { display:grid; grid-template-columns:1fr auto 14px; align-items:center; gap:6px; margin-top:4px; white-space:nowrap; padding:1px 2px; }
+  #dbg .erow.chosen { background:#f1f1f1; }   /* subtle monochrome emphasis on the chosen command */
+  #dbg .erow .nm { font-weight:700; }
+  #dbg .erow .mk { display:inline-block; width:12px; }
+  #dbg .erow .tp { text-align:right; font-variant-numeric:tabular-nums; }
+  #dbg .erow .vg { text-align:center; font-weight:700; }
+  #dbg .pr { margin:1px 0 0 12px; color:#6b6b6b; white-space:nowrap; }
+  #dbg .bar { height:6px; background:var(--bg); border:1px solid var(--ink); overflow:hidden; margin:3px 0 2px 12px; width:calc(100% - 12px); }
   #dbg .bar i { display:block; height:100%; background:var(--ink); }
-  #cfg { margin-top:8px; font-size:11px; color:#9a9a9a; }
-  #cfg input[type=text],#cfg input[type=password]{ font-size:11px; padding:1px 3px; }
+  #cfg { margin-top:11px; font-size:11px; color:#7d7d7d;
+    display:flex; flex-wrap:wrap; justify-content:center; align-items:center; gap:6px 14px; }
+  #cfg .fld { display:inline-flex; align-items:center; gap:5px; }
+  #cfg label { display:inline-flex; align-items:center; gap:5px; }
+  #cfg input[type=text],#cfg input[type=password]{ font-size:11px; padding:2px 4px; border:1px solid #bdbdbd; background:var(--bg); color:var(--ink); }
 
   /* mode toggle + comparison mode — strictly black & white */
   #modebar { margin-bottom:12px; }
@@ -87,9 +101,9 @@
   <div id="hint">MOSAIC AI is NOT driving (mock) · SPACE = restart</div>
   <div id="cfg">
     <label><input type="checkbox" id="llm-real"> use real Cerebras</label>
-    &nbsp; base <input type="text" id="llm-base" value="https://api.cerebras.ai/v1" size="20">
-    model <input type="text" id="llm-model" value="gemma-4-31b" size="9">
-    key <input type="password" id="llm-key" size="8">
+    <span class="fld">base <input type="text" id="llm-base" value="https://api.cerebras.ai/v1" size="20"></span>
+    <span class="fld">model <input type="text" id="llm-model" value="gemma-4-31b" size="9"></span>
+    <span class="fld">key <input type="password" id="llm-key" size="8"></span>
   </div>
 
   <!-- Key popup shown when "use real Cerebras" is checked -->
@@ -595,41 +609,40 @@ function drawDebug() {
   if (!el) return;
   const live = getWorldState();
   const L = mosaic.last;
-  const pct = x => (x * 100).toFixed(0) + '%';
-  // plain words for one expert's forward prediction
-  const predWords = p => p ? ('predicts ' + (p.safety > 0 ? 'SAFE ' : 'CRASH') + ' · coin:' + (p.reward > 0 ? 'YES' : 'NO')) : 'predicts —';
-  // ✓/✗ for this expert's SAFE/CRASH call vs the actual outcome (plain right/wrong).
-  // (Trust/responsibility — the bar — reflects the full prediction; this glyph is
-  //  the headline safe-vs-crash verdict, matching "actual: SAFE ✓ / CRASH ✗".)
-  const verdict = (p, a) => {
-    if (!a || !p) return '';
-    return ((p.safety > 0) === (!a.crashed)) ? ' ✓' : ' ✗';
-  };
+  const pct = x => Math.round(x * 100) + '%';
   const a = L ? L.actual : null;
-  const sitFront = L ? L.front : live.front;          // describe the DECISION being shown
+  const sitFront = L ? L.front : live.front;          // the DECISION being shown
   const sitCoin  = L ? L.coin : live.coin_ahead;
-  let html = '<b>EXPERTS</b>';
-  html += '<div class="row">situation: <b>' + sitFront + '</b>' + (sitCoin ? ' · coin ahead' : '') + '</div>';
-  if (L && a) html += '<div class="row">actual: <b>' + (a.crashed ? 'CRASH' : 'SAFE') + (a.gotCoin ? ' +coin' : '') + '</b></div>';
-  else        html += '<div class="row" style="color:#9a9a9a">…deciding (waiting for result)</div>';
-  html += '<div class="row" style="color:#9a9a9a">approaching: ' + live.front + '</div>';
-  html += '<hr>';
-  // one block per expert: name+verdict, plain prediction, trust bar (live resp)
+  // ✓/✗ = was THIS expert's safe-vs-crash call right? (distinct from ▶ = chosen)
+  const verdict = p => (!a || !p) ? '' : (((p.safety > 0) === (!a.crashed)) ? '✓' : '✗');
+  let h = '<div class="title">EXPERTS</div>';
+  // one coherent situation header for the scored decision
+  h += '<div class="sit"><span class="k">situation</span> <b>' + sitFront + '</b>' +
+       (sitCoin ? ' <b>◎</b>' : '') + '</div>';
+  if (L && a) h += '<div class="res"><span class="k dim">result</span> <b>' + (a.crashed ? 'CRASH' : 'SAFE') + (a.gotCoin ? ' ◎' : '') + '</b></div>';
+  else        h += '<div class="res dim">deciding…</div>';
+  h += '<hr>';
   for (const e of experts) {
     const p = L && L.preds ? L.preds[e.id] : null;
     const r = mosaic.resp[e.id] || 0;
-    const win = L && L.command === e.action;
-    html += '<div class="row"><b>' + (win ? '▶ ' : '') + e.id.toUpperCase() + '</b>' +
-            '<span style="float:right">' + pct(r) + verdict(p, a) + '</span></div>';
-    html += '<div class="row" style="color:#5b5b5b">' + predWords(p) + '</div>';
-    html += '<div class="bar"><i style="width:' + pct(r) + '"></i></div>';
+    const chosen = L && L.command === e.action;
+    const safe = p ? (p.safety > 0) : null;
+    h += '<div class="erow' + (chosen ? ' chosen' : '') + '">' +
+           '<span class="nm"><span class="mk">' + (chosen ? '▶' : '') + '</span>' + e.id.toUpperCase() + '</span>' +
+           '<span class="tp">' + pct(r) + '</span>' +
+           '<span class="vg">' + verdict(p) + '</span>' +
+         '</div>';
+    h += '<div class="pr">predicts ' + (safe === null ? '—' : (safe ? 'SAFE' : 'CRASH')) +
+         (p && p.reward > 0 ? ' ◎' : '') + '</div>';
+    h += '<div class="bar"><i style="width:' + pct(r) + '"></i></div>';
   }
-  html += '<hr>';
-  if (L) html += '<div class="row">command: <b>' + (L.command || '?').toUpperCase() + '</b></div>';
+  h += '<hr>';
+  h += '<div class="legend dim">▶ chosen &nbsp; ✓/✗ was it right</div>';
+  h += '<div class="next dim">now approaching: ' + live.front + '</div>';
   const _m = llmMode();
   const _lbl = _m === 'cerebras' ? 'Cerebras' : _m === 'mock-no-key' ? 'mock (no key)' : 'mock';
-  html += '<div class="row" style="color:#9a9a9a">LLM: ' + _lbl + '</div>';
-  el.innerHTML = html;
+  h += '<div class="llm dim">LLM: ' + _lbl + '</div>';
+  el.innerHTML = h;
 }
 
 /* =======================================================================
