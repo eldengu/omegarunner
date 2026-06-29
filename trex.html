@@ -48,6 +48,10 @@
   .cmp-meta { margin-top:5px; font-size:12px; letter-spacing:0.5px; }
   .pbar { display:inline-block; width:320px; height:11px; border:1px solid var(--ink); vertical-align:middle; }
   .pbar i { display:block; height:100%; background:var(--ink); width:0%; }
+  #cmp-pace { font-size:12px; letter-spacing:1px; margin-bottom:2px; }
+  #cmp-pace button { padding:2px 9px; margin-left:3px; }
+  #cmp-pace button.on { background:var(--ink); color:var(--bg); }
+  .cmp-log { margin-top:5px; font-size:10px; line-height:1.55; min-height:78px; color:var(--ink); text-align:left; width:320px; }
   #cmp-verdict { max-width:620px; font-size:12px; line-height:1.55; min-height:36px; text-align:center; margin-top:4px; }
 </style>
 </head>
@@ -72,18 +76,25 @@
   <!-- Comparison mode: same seeded course, two latencies. Throughput, not survival. -->
   <div id="cmp" class="hidden">
     <div id="cmp-clock">elapsed 0.0s</div>
+    <div id="cmp-pace">pace
+      <button type="button" data-pace="0.25" class="on">0.25&times;</button>
+      <button type="button" data-pace="0.5">0.5&times;</button>
+      <button type="button" data-pace="1">1&times;</button>
+    </div>
     <div class="cmp-row">
       <div class="cmp-lane">
         <div class="cmp-head">slow LLM &mdash; 1200 ms / decision</div>
         <canvas id="cmp-slow" width="560" height="120"></canvas>
         <div class="cmp-meta">progress <span class="pbar"><i id="bar-slow"></i></span>
           <span id="pct-slow">0%</span> &nbsp;·&nbsp; cleared <span id="cl-slow">0</span></div>
+        <div class="cmp-log" id="log-slow"></div>
       </div>
       <div class="cmp-lane">
         <div class="cmp-head">Cerebras &mdash; 50 ms / decision</div>
         <canvas id="cmp-fast" width="560" height="120"></canvas>
         <div class="cmp-meta">progress <span class="pbar"><i id="bar-fast"></i></span>
           <span id="pct-fast">0%</span> &nbsp;·&nbsp; cleared <span id="cl-fast">0</span></div>
+        <div class="cmp-log" id="log-fast"></div>
       </div>
     </div>
     <div id="cmp-verdict"></div>
@@ -528,7 +539,11 @@ const CMP = {
   seed: 0x5eed1234,                  // SAME seed for both runners -> identical course
 };
 const MINI = { W: 560, H: 120, ground: 95, dinoX: 70, dinoH: 24, grav: 0.9, jump: -11 };
-const cmp = { running: false, elapsed: 0, lastNow: 0, slow: null, fast: null, ctxSlow: null, ctxFast: null, inited: false };
+// pace = playback scale (virtual-time per real-time). <1 = slow motion so each
+// decision pause is readable. Default slow. Does NOT change the simulated
+// dynamics — only how fast that fixed simulation is replayed.
+const cmp = { running: false, elapsed: 0, vt: 0, lastNow: 0, pace: 0.25,
+              slow: null, fast: null, ctxSlow: null, ctxFast: null, inited: false };
 
 // Deterministic PRNG so both runners (and reruns) get the identical course.
 function mulberry32(a) {
@@ -553,8 +568,13 @@ function genCourse(seed) {
   return { items, len: Math.round(x + 320) };
 }
 function makeRunner(latencyMs, course) {
-  return { latency: latencyMs, course, pos: 0, idx: 0, deciding: false, decideUntil: 0,
-           lastCmd: null, cleared: 0, done: false, dinoY: MINI.ground - MINI.dinoH, dinoVy: 0, onGround: true };
+  return { latency: latencyMs, course, pos: 0, idx: 0, deciding: false, decideUntil: 0, decideStart: 0,
+           lastCmd: null, pendingFront: '', cleared: 0, done: false, log: [],
+           dinoY: MINI.ground - MINI.dinoH, dinoVy: 0, onGround: true };
+}
+// Discrete "front" of a course obstacle (same vocabulary the LLM sees).
+function frontOf(o) {
+  return classifyFront(o.kind === 'cactus' ? { type: 'cactus', h: o.h, y: 0 } : { type: 'bird', y: o.y });
 }
 // REUSE the MOSAIC control as-is (classifyFront + mockLLM + decide) to pick the
 // action. Same course + same math -> both runners judge identically (correctly).
@@ -565,7 +585,8 @@ function cmpDecide(o) {
   const pr = parsePrediction(mockLLM({ state: st, action: 'run' }));
   return decide(pj, pr).action;
 }
-// Advance one runner by real elapsed dt (ms). World HOLDS while deciding.
+// Advance one runner by virtual elapsed dt (ms). World HOLDS while deciding.
+// (Pacing only scales how dt/now relate to real time; the dynamics are fixed.)
 function cmpStep(r, now, dt) {
   if (r.done) return;
   // cosmetic jump physics
@@ -575,6 +596,7 @@ function cmpStep(r, now, dt) {
   if (r.deciding) {                                  // world held until the decision returns
     if (now >= r.decideUntil) {
       const it = r.course.items[r.idx];
+      r.pendingFront = it ? frontOf(it.o) : 'none';
       r.lastCmd = it ? cmpDecide(it.o) : 'run';      // SAME correct judgment, just delayed
       r.deciding = false;
     }
@@ -585,11 +607,15 @@ function cmpStep(r, now, dt) {
   if (it) {
     const ahead = it.dist - r.pos;
     if (ahead <= CMP.decideAhead && r.lastCmd === null) {   // reach a decision point -> hold + decide
-      r.deciding = true; r.decideUntil = now + r.latency;
+      r.deciding = true; r.decideStart = now; r.decideUntil = now + r.latency;
       return;
     }
     if (r.pos >= it.dist) {                          // obstacle reached -> cleared (never dies)
       if (r.lastCmd === 'jump' && r.onGround) { r.dinoVy = MINI.jump; r.onGround = false; }
+      // per-decision step log (front -> command -> result)
+      r.log.unshift('#' + (r.cleared + 1) + '  ' + (r.pendingFront || '?') +
+                    ' -> ' + (r.lastCmd || 'run').toUpperCase() + '  pass');
+      if (r.log.length > 5) r.log.pop();
       r.cleared++; r.idx++; r.lastCmd = null;
     }
   }
@@ -628,20 +654,28 @@ function cmpDrawLane(ctx, r) {
   }
   if (r.deciding) {
     ctx.font = 'bold 11px "Courier New",monospace';
-    ctx.fillText('DECIDING (' + r.latency + 'ms)…', dx, 18);
+    ctx.fillText('…deciding (' + r.latency + 'ms)', dx, 15);
+    // pause indicator on the dino (||) + a wait bar that fills as the latency elapses
+    ctx.fillRect(dx + 4, dy - 11, 3, 7); ctx.fillRect(dx + 11, dy - 11, 3, 7);
+    const bw = 64, bh = 6, bx = dx, by = 22;
+    const frac = Math.max(0, Math.min(1, (cmp.vt - r.decideStart) / r.latency));
+    ctx.lineWidth = 1; ctx.strokeStyle = INK; ctx.strokeRect(bx, by, bw, bh);
+    ctx.fillRect(bx, by, bw * frac, bh);
   } else if (r.done) {
     ctx.font = 'bold 11px "Courier New",monospace';
-    ctx.fillText('FINISHED', dx, 18);
+    ctx.fillText('FINISHED', dx, 15);
   }
 }
 function cmpSet(id, txt) { const el = document.getElementById(id); if (el) el.textContent = txt; }
+function cmpSetHTML(id, html) { const el = document.getElementById(id); if (el) el.innerHTML = html; }
 function cmpUpdateHUD() {
-  cmpSet('cmp-clock', 'elapsed ' + (cmp.elapsed / 1000).toFixed(1) + 's');
+  cmpSet('cmp-clock', 'elapsed ' + (cmp.elapsed / 1000).toFixed(1) + 's  (pace ' + cmp.pace + '×)');
   for (const [r, suf] of [[cmp.slow, 'slow'], [cmp.fast, 'fast']]) {
     const p = cmpProgress(r);
     const bar = document.getElementById('bar-' + suf); if (bar) bar.style.width = p.toFixed(1) + '%';
     cmpSet('pct-' + suf, p.toFixed(0) + '%');
     cmpSet('cl-' + suf, String(r.cleared));
+    cmpSetHTML('log-' + suf, r.log.length ? r.log.join('<br>') : '<span style="color:#9a9a9a">…waiting for first decision</span>');
   }
 }
 function cmpVerdict() {
@@ -653,10 +687,11 @@ function cmpVerdict() {
 }
 function cmpFrame(now) {
   if (!cmp.running) return;
-  const dt = Math.min(100, now - cmp.lastNow); cmp.lastNow = now;
-  cmp.elapsed += dt;
-  cmpStep(cmp.slow, now, dt);
-  cmpStep(cmp.fast, now, dt);
+  const realDt = Math.min(100, now - cmp.lastNow); cmp.lastNow = now;
+  const dt = realDt * cmp.pace;            // scale real time -> virtual (slow-motion when pace<1)
+  cmp.vt += dt; cmp.elapsed = cmp.vt;      // simulated elapsed (consistent across paces)
+  cmpStep(cmp.slow, cmp.vt, dt);
+  cmpStep(cmp.fast, cmp.vt, dt);
   cmpDrawLane(cmp.ctxSlow, cmp.slow);
   cmpDrawLane(cmp.ctxFast, cmp.fast);
   cmpUpdateHUD();
@@ -673,7 +708,7 @@ function cmpStart() {
   const course = genCourse(CMP.seed);                // ONE shared course -> identical for both
   cmp.slow = makeRunner(CMP.slowMs, course);
   cmp.fast = makeRunner(CMP.fastMs, course);
-  cmp.elapsed = 0; cmp.lastNow = nowMs(); cmp.running = true;
+  cmp.elapsed = 0; cmp.vt = 0; cmp.lastNow = nowMs(); cmp.running = true;
   cmpSet('cmp-verdict', '');
 }
 
@@ -741,6 +776,13 @@ if (msBtn) msBtn.addEventListener('click', () => setMode('single'));
 if (mcBtn) mcBtn.addEventListener('click', () => setMode('compare'));
 const cmpRestart = document.getElementById('cmp-restart');
 if (cmpRestart) cmpRestart.addEventListener('click', () => cmpStart());
+// Pace buttons (0.25× / 0.5× / 1×) — scale comparison playback speed only.
+document.querySelectorAll('#cmp-pace button').forEach(b => {
+  b.addEventListener('click', () => {
+    cmp.pace = parseFloat(b.getAttribute('data-pace')) || 1;
+    document.querySelectorAll('#cmp-pace button').forEach(x => x.classList.toggle('on', x === b));
+  });
+});
 
 // Test hooks (used by the headless harness; no effect in the browser).
 if (typeof window !== 'undefined') {
