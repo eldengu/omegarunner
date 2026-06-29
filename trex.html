@@ -87,7 +87,8 @@
         <canvas id="cmp-slow" width="560" height="120"></canvas>
         <div class="cmp-meta">progress <span class="pbar"><i id="bar-slow"></i></span>
           <span id="pct-slow">0%</span> &nbsp;·&nbsp; cleared <span id="cl-slow">0</span>
-          &nbsp;·&nbsp; coins <span id="co-slow">0</span></div>
+          &nbsp;·&nbsp; coins <span id="co-slow">0</span>
+          &nbsp;·&nbsp; <span id="tally-slow">J:0 R:0 D:0</span></div>
         <div class="cmp-log" id="log-slow"></div>
       </div>
       <div class="cmp-lane">
@@ -95,7 +96,8 @@
         <canvas id="cmp-fast" width="560" height="120"></canvas>
         <div class="cmp-meta">progress <span class="pbar"><i id="bar-fast"></i></span>
           <span id="pct-fast">0%</span> &nbsp;·&nbsp; cleared <span id="cl-fast">0</span>
-          &nbsp;·&nbsp; coins <span id="co-fast">0</span></div>
+          &nbsp;·&nbsp; coins <span id="co-fast">0</span>
+          &nbsp;·&nbsp; <span id="tally-fast">J:0 R:0 D:0</span></div>
         <div class="cmp-log" id="log-fast"></div>
       </div>
     </div>
@@ -641,9 +643,12 @@ function genCourse(seed) {
   const items = []; const coins = []; let x = 360;
   for (let i = 0; i < CMP.count; i++) {
     x += CMP.spacingMin + rng() * CMP.spacingVar;
-    let o;
-    if (rng() < 0.7) { const big = rng() < 0.5; o = { kind: 'cactus', h: big ? 50 : 35 }; }
-    else { const hi = rng() < 0.5; o = { kind: 'bird', y: hi ? (GROUND - 70) : (GROUND - 30), high: hi }; }
+    // Balanced mix so all three actions fire: ~40% cactus (JUMP), ~30% bird_high
+    // (DUCK), ~30% bird_low (JUMP-over). Guarantees cacti + bird_high + bird_low.
+    let o; const r1 = rng();
+    if (r1 < 0.40)      { const big = rng() < 0.5; o = { kind: 'cactus', h: big ? 50 : 35 }; }
+    else if (r1 < 0.70) { o = { kind: 'bird', y: GROUND - 70, high: true };  }   // bird_high -> DUCK
+    else                { o = { kind: 'bird', y: GROUND - 30, high: false }; }   // bird_low  -> JUMP
     items.push({ dist: Math.round(x), o });
     // coin spawning, same idea as single play: a flag at jump height between obstacles
     if (rng() < 0.55) coins.push({ dist: Math.round(x + 35 + rng() * 45), y: GROUND - 30 - rng() * 55 });
@@ -652,19 +657,20 @@ function genCourse(seed) {
 }
 function makeRunner(latencyMs, course) {
   return { latency: latencyMs, course, pos: 0, idx: 0, coinIdx: 0, deciding: false, decideUntil: 0, decideStart: 0,
-           lastCmd: null, pendingFront: '', cleared: 0, coinsGot: 0, done: false, log: [],
+           lastCmd: null, pendingFront: '', cleared: 0, coinsGot: 0, duckT: 0,
+           tally: { jump: 0, run: 0, duck: 0 }, done: false, log: [],
            dinoY: MINI.ground - MINI.dinoH, dinoVy: 0, onGround: true };
 }
 // Discrete "front" of a course obstacle (same vocabulary the LLM sees).
 function frontOf(o) {
   return classifyFront(o.kind === 'cactus' ? { type: 'cactus', h: o.h, y: 0 } : { type: 'bird', y: o.y });
 }
-// Comparison uses its ORIGINAL 2-action policy (jump/run) and is intentionally
-// decoupled from the single-game duck expert: high flyer -> run under it,
-// everything else -> jump. (Self-contained so the single-game's new duck-aware
-// mock/decide cannot change comparison behavior. Same course -> both identical.)
+// Comparison uses the SAME 3-action judgment as single play (self-contained, so
+// it doesn't depend on the single-game mock/decide): bird_high -> DUCK (crouch
+// under), cacti & bird_low -> JUMP (over). Both runners agree; only latency
+// differs. (RUN is never the correct answer here.)
 function cmpDecide(o) {
-  return frontOf(o) === 'bird_high' ? 'run' : 'jump';
+  return frontOf(o) === 'bird_high' ? 'duck' : 'jump';
 }
 // Advance one runner by virtual elapsed dt (ms). World HOLDS while deciding.
 // (Pacing only scales how dt/now relate to real time; the dynamics are fixed.)
@@ -673,6 +679,7 @@ function cmpStep(r, now, dt) {
   // cosmetic jump physics
   r.dinoVy += MINI.grav; r.dinoY += r.dinoVy;
   if (r.dinoY >= MINI.ground - MINI.dinoH) { r.dinoY = MINI.ground - MINI.dinoH; r.dinoVy = 0; r.onGround = true; }
+  if (r.duckT > 0) r.duckT--;                       // cosmetic crouch decays
 
   if (r.deciding) {                                  // world held until the decision returns
     if (now >= r.decideUntil) {
@@ -696,11 +703,13 @@ function cmpStep(r, now, dt) {
       r.deciding = true; r.decideStart = now; r.decideUntil = now + r.latency;
       return;
     }
+    if (r.lastCmd === 'duck' && ahead <= 40) r.duckT = 16;   // crouch as the bird arrives (DUCK)
     if (r.pos >= it.dist) {                          // obstacle reached -> cleared (never dies)
-      if (r.lastCmd === 'jump' && r.onGround) { r.dinoVy = MINI.jump; r.onGround = false; }
+      if (r.lastCmd === 'jump' && r.onGround) { r.dinoVy = MINI.jump; r.onGround = false; }   // hop over
+      const a = r.lastCmd || 'run';
+      r.tally[a] = (r.tally[a] || 0) + 1;            // per-action usage tally
       // per-decision step log (front -> command -> result)
-      r.log.unshift('#' + (r.cleared + 1) + '  ' + (r.pendingFront || '?') +
-                    ' -> ' + (r.lastCmd || 'run').toUpperCase() + '  pass');
+      r.log.unshift('#' + (r.cleared + 1) + '  ' + (r.pendingFront || '?') + ' -> ' + a.toUpperCase() + '  pass');
       if (r.log.length > 5) r.log.pop();
       r.cleared++; r.idx++; r.lastCmd = null;
     }
@@ -732,11 +741,20 @@ function cmpDrawLane(ctx, r) {
   ctx.clearRect(0, 0, MINI.W, MINI.H);
   ctx.fillStyle = INK;
   ctx.fillRect(0, MINI.ground, MINI.W, 2);
-  // dino (simple, monochrome)
-  const dx = MINI.dinoX, dy = r.dinoY;
-  ctx.fillRect(dx, dy, 22, 18);
-  ctx.fillRect(dx - 8, dy + 4, 10, 7);
-  ctx.fillRect(dx + 4, dy + 18, 6, 8); ctx.fillRect(dx + 13, dy + 18, 6, 8);
+  // dino — three visually distinct poses: DUCK = crouched/low, JUMP = hop (dinoY
+  // raised), RUN = normal standing.
+  const dx = MINI.dinoX;
+  if (r.duckT > 0 && r.onGround) {
+    const yy = MINI.ground - 13;                       // crouched: short, low body
+    ctx.fillRect(dx - 2, yy, 28, 11);
+    ctx.fillRect(dx + 21, yy - 3, 7, 6);               // head reaching forward
+    ctx.fillRect(dx + 3, yy + 11, 6, 2); ctx.fillRect(dx + 15, yy + 11, 6, 2);
+  } else {
+    const dy = r.dinoY;
+    ctx.fillRect(dx, dy, 22, 18);
+    ctx.fillRect(dx - 8, dy + 4, 10, 7);
+    ctx.fillRect(dx + 4, dy + 18, 6, 8); ctx.fillRect(dx + 13, dy + 18, 6, 8);
+  }
   // upcoming coins (uncollected)
   for (let i = r.coinIdx; i < r.course.coins.length; i++) {
     const sx = dx + (r.course.coins[i].dist - r.pos);
@@ -744,8 +762,9 @@ function cmpDrawLane(ctx, r) {
     if (sx < -40) continue;
     drawCmpCoin(ctx, r.course.coins[i], sx);
   }
-  // upcoming obstacles
-  for (let i = r.idx; i < r.course.items.length; i++) {
+  // obstacles (from idx-1 so a just-passed bird lingers a moment — you see the
+  // dino crouched as the bird passes overhead, then recede behind it)
+  for (let i = Math.max(0, r.idx - 1); i < r.course.items.length; i++) {
     const sx = dx + (r.course.items[i].dist - r.pos);
     if (sx > MINI.W + 40) break;
     if (sx < -40) continue;
@@ -775,6 +794,7 @@ function cmpUpdateHUD() {
     cmpSet('pct-' + suf, p.toFixed(0) + '%');
     cmpSet('cl-' + suf, String(r.cleared));
     cmpSet('co-' + suf, String(r.coinsGot));
+    cmpSet('tally-' + suf, 'J:' + r.tally.jump + ' R:' + r.tally.run + ' D:' + r.tally.duck);
     cmpSetHTML('log-' + suf, r.log.length ? r.log.join('<br>') : '<span style="color:#9a9a9a">…waiting for first decision</span>');
   }
 }
@@ -896,7 +916,7 @@ if (typeof window !== 'undefined') {
     DUCK_H, GROUND, GROUND_Y, DINO_H, llmMode, llmKeyPresent,
     setReal: v => { useRealLLM = v; },
     // comparison mode
-    CMP, cmp, mulberry32, genCourse, makeRunner, cmpStep, cmpDecide, cmpProgress, cmpStart, setMode,
+    CMP, cmp, mulberry32, genCourse, makeRunner, cmpStep, cmpDecide, cmpProgress, cmpStart, setMode, cmpFrame, frontOf,
   };
 }
 
