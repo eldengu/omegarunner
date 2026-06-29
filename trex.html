@@ -180,6 +180,12 @@ const GRAVITY = 0.7;
 const JUMP_V = -12.5;
 const DUCK_H = 24;        // crouched hitbox height (vs standing DINO_H=47): passes UNDER bird_high
 const DUCK_TICKS = 22;    // frames the crouch is held after a duck command
+// bird_high is an OVERHEAD CEILING: a hazard hanging from the top down to just
+// above the crouch line. It spans the jump arc (so JUMPING rises into it = crash)
+// AND head height (so RUNNING into it = crash); only the crouched dino (top at
+// GROUND-DUCK_H = 126) clears under it. Truthful geometry, scored by hit().
+const BIRD_HIGH_TOP = 20;          // top of the ceiling (well inside the jump apex zone)
+const BIRD_HIGH_H   = GROUND - 52; // 98 -> bottom at 118, ~8px above the crouch line (126)
 
 let obstacles = [];
 let coins = [];
@@ -187,17 +193,22 @@ let spawnTimer = 0;
 let coinTimer = 0;
 
 function spawnObstacle() {
+  // Balanced mix of THREE genuinely different correct actions:
+  //   cactus    -> JUMP over   (run/duck crash into it)
+  //   bird_high -> DUCK under  (JUMP rises into the ceiling = crash; run crashes)
+  //   bird_low  -> JUMP over   (run/duck crash into it)
   const r = Math.random();
-  if (r < 0.7) {
+  if (r < 0.35) {
     const big = Math.random() < 0.5;
     const w = big ? 25 : 17;
     const h = big ? 50 : 35;
     obstacles.push({ type:'cactus', x:W, y:GROUND - h, w, h });
+  } else if (r < 0.68) {
+    // overhead ceiling hanging from the top to just above the crouch line
+    obstacles.push({ type:'bird', high:true, x:W, y:BIRD_HIGH_TOP, w:34, h:BIRD_HIGH_H, flap:0 });
   } else {
-    // high = head-height (duck UNDER it) / low = near-ground (jump OVER it)
-    const heights = [GROUND - 48, GROUND - 24];
-    const y = heights[Math.floor(Math.random()*heights.length)];
-    obstacles.push({ type:'bird', x:W, y, w:34, h:24, flap:0 });
+    // low bird near the ground
+    obstacles.push({ type:'bird', high:false, x:W, y:GROUND - 24, w:34, h:24, flap:0 });
   }
 }
 
@@ -311,9 +322,10 @@ function mockLLM(meta) {
   const { state, action } = meta;
   let safety = 'bad';
   if (state.front === 'none')           safety = 'good';
-  else if (state.front === 'bird_high') safety = (action === 'duck') ? 'good' : 'bad';
+  else if (state.front === 'bird_high') safety = (action === 'duck') ? 'good' : 'bad';  // ceiling: only duck clears
   else /* cactus_* or bird_low */       safety = (action === 'jump') ? 'good' : 'bad';
-  const reward = (state.coin_ahead && action === 'jump') ? 'good' : 'bad';   // air coins need a jump
+  // Air coins need a jump — but jumping into the bird_high ceiling crashes, so no coin there.
+  const reward = (state.coin_ahead && action === 'jump' && state.front !== 'bird_high') ? 'good' : 'bad';
   return JSON.stringify({ safety, reward });
 }
 async function realCerebrasLLM(prompt, temperature) {
@@ -563,6 +575,15 @@ function drawCactus(o) {
 }
 
 function drawBird(o) {
+  if (o.high) {
+    // OVERHEAD CEILING hanging from the top down to ~head height — DUCK under it.
+    cx.fillRect(o.x, o.y, o.w, o.h);                          // solid hanging column
+    cx.clearRect(o.x + 6, o.y + 16, o.w - 12, 3);            // ridge lines (texture, monochrome)
+    cx.clearRect(o.x + 6, o.y + o.h - 24, o.w - 12, 3);
+    cx.fillRect(o.x - 4, o.y + o.h - 6, o.w + 8, 6);          // overhanging bottom lip (the duck line)
+    return;
+  }
+  // low bird near the ground — JUMP over it
   const up = o.flap < 1;
   cx.fillRect(o.x+10, o.y+8, 18, 8);
   cx.fillRect(o.x+26, o.y+6, 8, 5);
@@ -781,10 +802,15 @@ function drawCmpObs(ctx, o, sx) {
     const h = o.h * 0.5;                              // scale to mini canvas
     ctx.fillRect(sx, g - h, 10, h);
     ctx.fillRect(sx - 5, g - h * 0.6, 5, 5); ctx.fillRect(sx + 10, g - h * 0.75, 5, 5);
+  } else if (o.high) {
+    // overhead ceiling hanging from the top to just above the crouch line — DUCK under
+    const bottom = g - 19;                            // crouch top is g-13 (=82); bottom (76) clears it
+    ctx.fillRect(sx, 4, 16, bottom - 4);
+    ctx.fillRect(sx - 3, bottom - 5, 22, 5);          // bottom lip
   } else {
-    const by = o.high ? g - 52 : g - 22;             // high = run under; low = jump over
-    ctx.fillRect(sx, by, 18, 7);
-    ctx.fillRect(sx + (o.high ? 0 : 0), by - 4, 6, 4);
+    // low bird near the ground — JUMP over
+    ctx.fillRect(sx, g - 22, 18, 7);
+    ctx.fillRect(sx, g - 26, 6, 4);
   }
 }
 function drawCmpCoin(ctx, c, sx) {
