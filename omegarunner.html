@@ -218,15 +218,19 @@
           <span class="hint" id="m-info"></span>
         </div>
         <div class="hint" style="margin:2px 0 8px">
-          Three experts (same model, different system prompts), each a forward+inverse
-          <b>pair</b>, with a <b>responsibility predictor (RP)</b>.
-          <b>Phase 1 — select:</b> from the situation signature (sensory cues only) the RP
-          looks up each expert's learned forward-accuracy → λ; the executed action is the
-          λ-weighted vote over their inverse proposals.
-          <b>Phase 2 — learn:</b> the deterministic game gives the exact outcome; code
-          scores each expert's forward prediction and trains the RP for this situation.
-          Columns show <b>prior</b> (RP accuracy used to select, with sample count),
-          <b>λ</b> (the bar), and <b>e</b> (forward error this tick, used to learn).
+          Three experts (same model) with <b>distinct forward models</b> — different world views
+          (coin-optimist / safety-pessimist / jump-believer) that bias HOW each predicts coin/freeze,
+          so for the same state they give <b>different</b> next-state predictions — plus a
+          <b>responsibility predictor (RP)</b>.
+          <b>Phase 1 — select:</b> from the situation signature (sensory cues only) the RP looks up
+          each expert's learned forward-accuracy → λ; the executed action is the λ-weighted vote over
+          their inverse proposals.
+          <b>Phase 2 — learn:</b> the deterministic game gives the exact outcome; code scores each
+          expert's forward prediction and trains its RP record for this situation — so each expert
+          earns responsibility in the situations its world view predicts correctly.
+          The subtitle under each name shows its world view + the situations it is winning;
+          columns show <b>prior</b> (RP accuracy + sample count), <b>λ</b> (the bar), and
+          <b>e</b> (forward error this tick).
         </div>
         <div class="hint" style="margin:0 0 8px">
           situation signature: <code id="m-sig" style="font-weight:700;color:#10233f">—</code>
@@ -1490,10 +1494,19 @@ window.addEventListener('keydown', (ev) => {
 
 /* =========================================================================
    MOSAIC controller (Wolpert & Kawato 1998) over an LLM, WITH a responsibility
-   predictor (RP). N modules ("experts"), each the SAME model (gemma-4-31b on
-   Cerebras) with a DIFFERENT system prompt / personality, each a forward+inverse
-   PAIR. The RP is what lets the controller pick "the right expert for THIS
-   situation" instead of just the overall-best one.
+   predictor (RP). N modules ("experts") are the SAME model (gemma-4-31b on
+   Cerebras), each a forward+inverse PAIR, but each with a DISTINCT FORWARD MODEL
+   — a different "world view" (coin-optimist / safety-pessimist / jump-believer)
+   that biases HOW it predicts coin/freeze outcomes. So for the SAME state and
+   SAME action the three give DIFFERENT next-state predictions, and the
+   deterministic outcome makes each accurate in a DIFFERENT region of the
+   dynamics. The RP then learns, per situation, which forward model is right —
+   letting the controller pick "the right expert for THIS situation".
+
+   Why distinct forward models: when every expert answered the objective forward
+   question the same way, their per-situation accuracies were identical and λ was
+   stuck at 1/N. Biasing the FORWARD prediction (not just the inverse action) is
+   what makes the accuracies — and therefore λ — separate per situation.
 
    The chicken-and-egg fix: forward-prediction error only exists AFTER an action
    executes, so it CANNOT pick the action in the same tick. So selection uses the
@@ -1573,6 +1586,30 @@ function rpAccuracy(sig, id) {
   return (hit + RPCFG.priorA) / (n + RPCFG.priorA + RPCFG.priorB);
 }
 
+// Which situations is each expert "winning"? For the panel: the signatures where
+// this expert is the unique top-accuracy forward model (its world view is right
+// there) by a clear margin, given enough samples. Returns a short list of sigs.
+const WINCFG = { minN: 3, margin: 0.05, topK: 4 };
+function expertWinningSignatures(id, ids) {
+  ids = ids || MODULE_DEFS.map(d => d.id);
+  const wins = [];
+  for (const sig in rp.table) {
+    const row = rp.table[sig];
+    const mine = row[id];
+    if (!mine || mine.n < WINCFG.minN) continue;
+    let bestId = null, bestAcc = -1, secondAcc = -1;
+    for (const x of ids) {
+      const a = rpAccuracy(sig, x);
+      if (a > bestAcc) { secondAcc = bestAcc; bestAcc = a; bestId = x; }
+      else if (a > secondAcc) { secondAcc = a; }
+    }
+    if (bestId === id && (bestAcc - secondAcc) >= WINCFG.margin) {
+      wins.push({ sig, acc: bestAcc, lead: bestAcc - secondAcc });
+    }
+  }
+  return wins.sort((a, b) => b.lead - a.lead).slice(0, WINCFG.topK).map(w => w.sig);
+}
+
 // Category of the nearest entity ahead in a lane, within the near window. Mirrors
 // encodeState's "nearest ahead" logic WITHOUT modifying encodeState.
 function laneCategory(g, lane) {
@@ -1615,7 +1652,12 @@ function situationSignature(g) {
 const DECISION_INTERVAL_MS = 3600;  // min game-time between LLM decisions
 const RATELIMIT_BACKOFF_MS = 600;   // brief wait before a single retry on HTTP 429
 
-// The three expert personalities. Same model, different system prompts.
+// The three experts share this core but each has a DISTINCT FORWARD MODEL — a
+// different "world view" that biases HOW it predicts outcomes (coin/freeze), not
+// just which action it picks. That is the key: for the SAME state and SAME action
+// the three give DIFFERENT next-state predictions, so the deterministic outcome
+// makes each one accurate (and earn responsibility) in a DIFFERENT region of the
+// dynamics — exactly wk98, where each forward model captures part of the world.
 const PERSONA_CORE =
   "You control a penguin in a 3-lane endless runner. Each decision you pick ONE action:\n" +
   "  left  = move one lane left\n  right = move one lane right\n" +
@@ -1627,24 +1669,36 @@ const PERSONA_CORE =
   "The state text lists, per lane, the nearest thing ahead and how many tiles away, then your lane and posture.\n" +
   "You are a forward+inverse PAIR. Do TWO things:\n" +
   "  (1) INVERSE: choose ONE action to execute now.\n" +
-  "  (2) FORWARD: for EACH of the four actions, predict the outcome on the next step IF that action were the one executed:\n" +
+  "  (2) FORWARD: for EACH of the four actions, predict the next-step outcome IF that action were executed:\n" +
   "      coin = 1 if you'd collect a gold flag (else 0); freeze = true if you'd hit a hazard and freeze (else false).\n" +
   "Reply with ONLY a compact JSON object, no prose, no code fence:\n" +
   '{"action":"left|right|jump|stay","forward":{' +
   '"left":{"coin":0,"freeze":false},"right":{"coin":0,"freeze":false},' +
   '"jump":{"coin":0,"freeze":false},"stay":{"coin":0,"freeze":false}}}\n' +
-  "Predict each action HONESTLY from the state (this is your forward model), independent of which action you chose.";
+  "Your FORWARD model is NOT neutral: predict outcomes THROUGH YOUR WORLD VIEW below. Two experts " +
+  "seeing the same state may reasonably predict different coin/freeze outcomes — commit to YOUR " +
+  "view's call rather than hedging to a safe consensus. Your world view shapes HOW you predict.";
 
+// Each bias is a distinct FORWARD-MODEL world view (it tilts the coin/freeze
+// predictions), not merely an action preference. No expert is "correct"
+// everywhere — each is right where its world view matches the real dynamics.
 const MODULE_DEFS = [
-  { id: 'greedy', name: 'Goldbeak', persona: 'coin-greedy',
-    bias: "PERSONALITY: COIN-GREEDY. You love gold flags above all. Chase coins aggressively, " +
-          "switch into the flag's lane whenever you can, and accept some risk to grab them." },
-  { id: 'safe', name: 'Iceguard', persona: 'safety-first',
-    bias: "PERSONALITY: SAFETY-FIRST. You hate freezing. Always pick the lane/action that avoids " +
-          "any hazard. Prefer a clear lane; only jump when a hole is in your lane and no clear lane is easy. Coins are secondary to never getting hit." },
-  { id: 'jumpy', name: 'Hopster', persona: 'jump-happy',
-    bias: "PERSONALITY: JUMP-HAPPY. You love hopping. Whenever a ground hole/hurdle is ahead in your " +
-          "lane, JUMP it rather than dodging. Jump to clear hazards and to snag flags mid-hop. (Remember jumping does NOT clear tall barriers.)" },
+  { id: 'greedy', name: 'Optimist', persona: 'coin-optimist',
+    bias: "WORLD VIEW: COIN-OPTIMIST. You see opportunity everywhere. In your FORWARD predictions lean " +
+          "toward coin=1 whenever a flag is anywhere ahead in a reachable lane (assume you'll grab it), and " +
+          "toward freeze=false (you expect to slip past hazards). When unsure, predict the GOOD outcome. " +
+          "INVERSE: chase coins." },
+  { id: 'safe', name: 'Pessimist', persona: 'safety-pessimist',
+    bias: "WORLD VIEW: SAFETY-PESSIMIST. You see danger everywhere. In your FORWARD predictions lean toward " +
+          "freeze=true whenever ANY hazard (hole or barrier) is ahead in your path or the action moves toward " +
+          "one, and treat coins as hard to get (coin=0 unless a flag is dead ahead in your own lane). When " +
+          "unsure, predict the BAD outcome. INVERSE: avoid hazards." },
+  { id: 'jumpy', name: 'Jumper', persona: 'jump-believer',
+    bias: "WORLD VIEW: JUMP-BELIEVER. You trust bold hops. In your FORWARD predictions assume JUMP clears " +
+          "ground hazards (predict freeze=false for the jump action even over a hole) and that decisive moves " +
+          "succeed; for NON-jump actions near a hazard predict freeze=true. You may UNDER-rate barriers " +
+          "(jumping does NOT really clear a tall barrier — your view is over-optimistic about jumping). " +
+          "INVERSE: jump hazards." },
 ];
 
 const mosaic = {
@@ -1947,7 +2001,7 @@ function buildModulesUI() {
     row.className = 'mod'; row.id = 'mod-' + i;
     row.innerHTML =
       '<div><div class="mname">' + m.name + '</div>' +
-      '<div class="mpersona">' + m.persona + '</div></div>' +
+      '<div class="mpersona" id="mspec-' + i + '" title="world view + the situations this expert is currently winning (highest accuracy)">' + m.persona + '</div></div>' +
       '<div class="maction" id="mact-' + i + '">· stay</div>' +
       '<div class="mprior na" id="mprior-' + i + '" title="RP prior: this module&#39;s learned forward-accuracy for the current situation (drives selection)">prior —</div>' +
       '<div class="mbarwrap"><div class="mbar" id="mbar-' + i + '"></div>' +
@@ -1963,6 +2017,7 @@ function renderModules(winnerIdx, action, actual) {
   mosaic.modules.forEach((m, i) => {
     const row = document.getElementById('mod-' + i);
     const act = document.getElementById('mact-' + i);
+    const spec = document.getElementById('mspec-' + i);
     const pr = document.getElementById('mprior-' + i);
     const bar = document.getElementById('mbar-' + i);
     const pct = document.getElementById('mpct-' + i);
@@ -1970,6 +2025,11 @@ function renderModules(winnerIdx, action, actual) {
     if (!row) return;
     row.classList.toggle('win', i === winnerIdx && winnerIdx >= 0);
     if (act) act.textContent = ACTION_GLYPH[m.action] || m.action;
+    if (spec) {
+      // World view + the situations this expert is currently winning.
+      const wins = expertWinningSignatures(m.id);
+      spec.textContent = m.persona + (wins.length ? ' · wins ' + wins.join(' ') : '');
+    }
     if (pr) {
       // RP prior used to SELECT: per-situation forward accuracy + sample count.
       if (m.rpAcc == null) { pr.className = 'mprior na'; pr.textContent = 'prior —'; }
@@ -2405,6 +2465,8 @@ if (typeof window !== 'undefined') {
     // Responsibility predictor (RP)
     rp, RPCFG, situationSignature, laneCategory, rpAccuracy, rpEntry,
     rpSelect, rpLearn, rpLoad, rpSave,
+    // Persona forward models (distinct world views)
+    PERSONA_CORE, MODULE_DEFS, WINCFG, expertWinningSignatures,
   };
 }
 
