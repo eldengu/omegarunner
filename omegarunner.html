@@ -1506,10 +1506,10 @@ const MCFG = {
 // Request rate ≈ (calls per decision) / DECISION_INTERVAL_MS. To stay under
 // 100 req/min:  single panel (3 calls)  -> interval >= ~1800 ms
 //               comparison  (6 calls)   -> interval >= ~3600 ms
-// 700 ms (≈ the 500–800 ms target) is the floor for spacing; raise this
-// constant toward the values above if you still see 429s, especially in the
-// comparison view. One tunable knob, applied to BOTH modes.
-const DECISION_INTERVAL_MS = 700;   // min game-time between LLM decisions
+// 3600 ms is sized for the comparison view (the heavier 6-call case) so both
+// modes stay under the limit; lower it toward the 500–800 ms range if you only
+// run the single panel and want snappier decisions. One tunable knob, BOTH modes.
+const DECISION_INTERVAL_MS = 3600;  // min game-time between LLM decisions
 const RATELIMIT_BACKOFF_MS = 600;   // brief wait before a single retry on HTTP 429
 
 // The three expert personalities. Same model, different system prompts.
