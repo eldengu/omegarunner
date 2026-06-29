@@ -293,15 +293,19 @@ async function predictExpert(state, action) {
   return parsePrediction(await callCerebrasLLM(buildPrompt(state, action), 0, { state, action }));
 }
 
-// Stage 4: responsibility-weighted command over N experts (no hardcoded count).
-// Each expert votes for its action with score = responsibility × predicted value
-// (safety+reward); the command is the argmax. For N=2 this is exactly the old
-// jump-probability ≥ 0.5 rule — generalized, not changed.
+// Stage 4: PREDICTION-FIRST command over N experts (no hardcoded count).
+// Score each expert by THIS turn's predicted value (safety+reward); responsibility
+// is used ONLY to break ties among equal predicted values (tiny ε term, far below
+// the minimum value gap of 5, so it can never override a better prediction). This
+// follows the current prediction instead of latching onto a once-trusted expert
+// whose responsibility has decayed to ~0. (Stage-3 responsibilities still update
+// and still drive the trust bars — they just no longer veto a correct prediction.)
 function decide(preds, resp) {
+  const EPS = 0.01;
   let best = null, bestScore = -Infinity;
   for (const e of experts) {
     const p = preds[e.id] || { safety: 0, reward: 0 };
-    const s = (resp[e.id] || 0) * (p.safety + p.reward);
+    const s = (p.safety + p.reward) + EPS * (resp[e.id] || 0);
     if (s > bestScore) { bestScore = s; best = e; }
   }
   return { action: best ? best.action : 'run' };
