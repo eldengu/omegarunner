@@ -31,9 +31,31 @@
   #dbg .bar i { display:block; height:100%; background:#535353; }
   #cfg { margin-top:8px; font-size:11px; color:#9a9a9a; }
   #cfg input[type=text],#cfg input[type=password]{ font-size:11px; padding:1px 3px; }
+
+  /* mode toggle + comparison mode — strictly black & white */
+  #modebar { margin-bottom:12px; }
+  #modebar button, #cmp button {
+    font-family:"Courier New",monospace; font-size:12px; color:var(--ink);
+    background:var(--bg); border:1px solid var(--ink); padding:3px 12px; cursor:pointer; letter-spacing:1px;
+  }
+  #modebar button.on { background:var(--ink); color:var(--bg); }
+  .hidden { display:none !important; }
+  #cmp { display:flex; flex-direction:column; align-items:center; gap:6px; }
+  #cmp-clock { font-size:15px; letter-spacing:2px; margin-bottom:2px; }
+  .cmp-row { display:flex; flex-direction:column; gap:12px; }
+  .cmp-head { font-size:12px; margin-bottom:3px; letter-spacing:1px; }
+  #cmp canvas { border:1px solid #e2e2e2; display:block; image-rendering:pixelated; }
+  .cmp-meta { margin-top:5px; font-size:12px; letter-spacing:0.5px; }
+  .pbar { display:inline-block; width:320px; height:11px; border:1px solid var(--ink); vertical-align:middle; }
+  .pbar i { display:block; height:100%; background:var(--ink); width:0%; }
+  #cmp-verdict { max-width:620px; font-size:12px; line-height:1.55; min-height:36px; text-align:center; margin-top:4px; }
 </style>
 </head>
 <body>
+  <div id="modebar">
+    <button id="mode-single" class="on" type="button">Single play</button>
+    <button id="mode-compare" type="button">Comparison</button>
+  </div>
   <div id="wrap">
     <canvas id="game" width="600" height="200"></canvas>
     <div id="overlay"></div>
@@ -45,6 +67,27 @@
     &nbsp; base <input type="text" id="llm-base" value="https://api.cerebras.ai/v1" size="20">
     model <input type="text" id="llm-model" value="gemma-4-31b" size="9">
     key <input type="password" id="llm-key" size="8">
+  </div>
+
+  <!-- Comparison mode: same seeded course, two latencies. Throughput, not survival. -->
+  <div id="cmp" class="hidden">
+    <div id="cmp-clock">elapsed 0.0s</div>
+    <div class="cmp-row">
+      <div class="cmp-lane">
+        <div class="cmp-head">slow LLM &mdash; 1200 ms / decision</div>
+        <canvas id="cmp-slow" width="560" height="120"></canvas>
+        <div class="cmp-meta">progress <span class="pbar"><i id="bar-slow"></i></span>
+          <span id="pct-slow">0%</span> &nbsp;·&nbsp; cleared <span id="cl-slow">0</span></div>
+      </div>
+      <div class="cmp-lane">
+        <div class="cmp-head">Cerebras &mdash; 50 ms / decision</div>
+        <canvas id="cmp-fast" width="560" height="120"></canvas>
+        <div class="cmp-meta">progress <span class="pbar"><i id="bar-fast"></i></span>
+          <span id="pct-fast">0%</span> &nbsp;·&nbsp; cleared <span id="cl-fast">0</span></div>
+      </div>
+    </div>
+    <div id="cmp-verdict"></div>
+    <button id="cmp-restart" type="button">restart comparison</button>
   </div>
 
 <script>
@@ -464,13 +507,199 @@ function drawDebug() {
   el.innerHTML = html;
 }
 
+/* =======================================================================
+   COMPARISON MODE (additive; single-game logic untouched).
+   Two dinos on the SAME seeded course. They make the SAME (correct) MOSAIC
+   judgment at every obstacle — the ONLY difference is decision latency. The
+   world HOLDS at each decision until it returns, so neither dino ever dies
+   from being slow. In equal elapsed time the fast (Cerebras, 50ms) runner
+   covers far more course than the slow (1200ms) one: speed = throughput.
+   ======================================================================= */
+function nowMs() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
+
+const CMP = {
+  slowMs: 1200, fastMs: 50,          // fixed decision latency per decision point
+  speedPxps: 2200,                   // course px/sec while RUNNING (fast travel so the
+                                     // decision PAUSE dominates the cycle -> big throughput gap)
+  spacingMin: 80, spacingVar: 60,    // course distance between obstacles
+  decideAhead: 110,                  // begin deciding when an obstacle is this far ahead
+  count: 64,                         // obstacles in the course
+  timeCapMs: 30000,                  // safety cap on the demo
+  seed: 0x5eed1234,                  // SAME seed for both runners -> identical course
+};
+const MINI = { W: 560, H: 120, ground: 95, dinoX: 70, dinoH: 24, grav: 0.9, jump: -11 };
+const cmp = { running: false, elapsed: 0, lastNow: 0, slow: null, fast: null, ctxSlow: null, ctxFast: null, inited: false };
+
+// Deterministic PRNG so both runners (and reruns) get the identical course.
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+// Build the shared course: a list of {dist, o} (obstacle) at increasing positions.
+function genCourse(seed) {
+  const rng = mulberry32(seed);
+  const items = []; let x = 360;
+  for (let i = 0; i < CMP.count; i++) {
+    x += CMP.spacingMin + rng() * CMP.spacingVar;
+    let o;
+    if (rng() < 0.7) { const big = rng() < 0.5; o = { kind: 'cactus', h: big ? 50 : 35 }; }
+    else { const hi = rng() < 0.5; o = { kind: 'bird', y: hi ? (GROUND - 70) : (GROUND - 30), high: hi }; }
+    items.push({ dist: Math.round(x), o });
+  }
+  return { items, len: Math.round(x + 320) };
+}
+function makeRunner(latencyMs, course) {
+  return { latency: latencyMs, course, pos: 0, idx: 0, deciding: false, decideUntil: 0,
+           lastCmd: null, cleared: 0, done: false, dinoY: MINI.ground - MINI.dinoH, dinoVy: 0, onGround: true };
+}
+// REUSE the MOSAIC control as-is (classifyFront + mockLLM + decide) to pick the
+// action. Same course + same math -> both runners judge identically (correctly).
+function cmpDecide(o) {
+  const obstacle = o.kind === 'cactus' ? { type: 'cactus', h: o.h, y: 0 } : { type: 'bird', y: o.y };
+  const st = { front: classifyFront(obstacle), dist_bucket: 0, coin_ahead: false, on_ground: true };
+  const pj = parsePrediction(mockLLM({ state: st, action: 'jump' }));
+  const pr = parsePrediction(mockLLM({ state: st, action: 'run' }));
+  return decide(pj, pr).action;
+}
+// Advance one runner by real elapsed dt (ms). World HOLDS while deciding.
+function cmpStep(r, now, dt) {
+  if (r.done) return;
+  // cosmetic jump physics
+  r.dinoVy += MINI.grav; r.dinoY += r.dinoVy;
+  if (r.dinoY >= MINI.ground - MINI.dinoH) { r.dinoY = MINI.ground - MINI.dinoH; r.dinoVy = 0; r.onGround = true; }
+
+  if (r.deciding) {                                  // world held until the decision returns
+    if (now >= r.decideUntil) {
+      const it = r.course.items[r.idx];
+      r.lastCmd = it ? cmpDecide(it.o) : 'run';      // SAME correct judgment, just delayed
+      r.deciding = false;
+    }
+    return;
+  }
+  r.pos += CMP.speedPxps * dt / 1000;                // RUN: advance the course
+  const it = r.course.items[r.idx];
+  if (it) {
+    const ahead = it.dist - r.pos;
+    if (ahead <= CMP.decideAhead && r.lastCmd === null) {   // reach a decision point -> hold + decide
+      r.deciding = true; r.decideUntil = now + r.latency;
+      return;
+    }
+    if (r.pos >= it.dist) {                          // obstacle reached -> cleared (never dies)
+      if (r.lastCmd === 'jump' && r.onGround) { r.dinoVy = MINI.jump; r.onGround = false; }
+      r.cleared++; r.idx++; r.lastCmd = null;
+    }
+  }
+  if (r.pos >= r.course.len) { r.pos = r.course.len; r.done = true; }
+}
+function cmpProgress(r) { return Math.min(100, r.pos / r.course.len * 100); }
+
+function drawCmpObs(ctx, o, sx) {
+  const g = MINI.ground;
+  if (o.kind === 'cactus') {
+    const h = o.h * 0.5;                              // scale to mini canvas
+    ctx.fillRect(sx, g - h, 10, h);
+    ctx.fillRect(sx - 5, g - h * 0.6, 5, 5); ctx.fillRect(sx + 10, g - h * 0.75, 5, 5);
+  } else {
+    const by = o.high ? g - 52 : g - 22;             // high = run under; low = jump over
+    ctx.fillRect(sx, by, 18, 7);
+    ctx.fillRect(sx + (o.high ? 0 : 0), by - 4, 6, 4);
+  }
+}
+function cmpDrawLane(ctx, r) {
+  if (!ctx) return;
+  ctx.clearRect(0, 0, MINI.W, MINI.H);
+  ctx.fillStyle = INK;
+  ctx.fillRect(0, MINI.ground, MINI.W, 2);
+  // dino (simple, monochrome)
+  const dx = MINI.dinoX, dy = r.dinoY;
+  ctx.fillRect(dx, dy, 22, 18);
+  ctx.fillRect(dx - 8, dy + 4, 10, 7);
+  ctx.fillRect(dx + 4, dy + 18, 6, 8); ctx.fillRect(dx + 13, dy + 18, 6, 8);
+  // upcoming obstacles
+  for (let i = r.idx; i < r.course.items.length; i++) {
+    const sx = dx + (r.course.items[i].dist - r.pos);
+    if (sx > MINI.W + 40) break;
+    if (sx < -40) continue;
+    drawCmpObs(ctx, r.course.items[i].o, sx);
+  }
+  if (r.deciding) {
+    ctx.font = 'bold 11px "Courier New",monospace';
+    ctx.fillText('DECIDING (' + r.latency + 'ms)…', dx, 18);
+  } else if (r.done) {
+    ctx.font = 'bold 11px "Courier New",monospace';
+    ctx.fillText('FINISHED', dx, 18);
+  }
+}
+function cmpSet(id, txt) { const el = document.getElementById(id); if (el) el.textContent = txt; }
+function cmpUpdateHUD() {
+  cmpSet('cmp-clock', 'elapsed ' + (cmp.elapsed / 1000).toFixed(1) + 's');
+  for (const [r, suf] of [[cmp.slow, 'slow'], [cmp.fast, 'fast']]) {
+    const p = cmpProgress(r);
+    const bar = document.getElementById('bar-' + suf); if (bar) bar.style.width = p.toFixed(1) + '%';
+    cmpSet('pct-' + suf, p.toFixed(0) + '%');
+    cmpSet('cl-' + suf, String(r.cleared));
+  }
+}
+function cmpVerdict() {
+  const slowP = Math.round(cmpProgress(cmp.slow)), fastP = Math.round(cmpProgress(cmp.fast));
+  cmpSet('cmp-verdict',
+    'Same elapsed time (' + (cmp.elapsed / 1000).toFixed(1) + 's) — both judged correctly, neither died, ' +
+    'but the slow LLM covered only ' + slowP + '% while Cerebras reached ' + fastP + '% — because it pauses ~' +
+    CMP.slowMs + 'ms at every decision. Speed = throughput, not survival.');
+}
+function cmpFrame(now) {
+  if (!cmp.running) return;
+  const dt = Math.min(100, now - cmp.lastNow); cmp.lastNow = now;
+  cmp.elapsed += dt;
+  cmpStep(cmp.slow, now, dt);
+  cmpStep(cmp.fast, now, dt);
+  cmpDrawLane(cmp.ctxSlow, cmp.slow);
+  cmpDrawLane(cmp.ctxFast, cmp.fast);
+  cmpUpdateHUD();
+  if (cmp.fast.done || cmp.elapsed >= CMP.timeCapMs) { cmp.running = false; cmpVerdict(); }
+}
+function cmpInit() {
+  if (cmp.inited) return;
+  const a = document.getElementById('cmp-slow'), b = document.getElementById('cmp-fast');
+  cmp.ctxSlow = a && a.getContext('2d'); cmp.ctxFast = b && b.getContext('2d');
+  cmp.inited = true;
+}
+function cmpStart() {
+  cmpInit();
+  const course = genCourse(CMP.seed);                // ONE shared course -> identical for both
+  cmp.slow = makeRunner(CMP.slowMs, course);
+  cmp.fast = makeRunner(CMP.fastMs, course);
+  cmp.elapsed = 0; cmp.lastNow = nowMs(); cmp.running = true;
+  cmpSet('cmp-verdict', '');
+}
+
+let mode = 'single';                                  // default: single play
+function setMode(m) {
+  mode = m;
+  const tog = (id, on) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !on); };
+  tog('wrap', m === 'single'); tog('hint', m === 'single'); tog('cfg', m === 'single');
+  tog('cmp', m === 'compare');
+  const ms = document.getElementById('mode-single'), mc = document.getElementById('mode-compare');
+  if (ms) ms.classList.toggle('on', m === 'single');
+  if (mc) mc.classList.toggle('on', m === 'compare');
+  if (m === 'compare') cmpStart();
+}
+
 function loop() {
-  G.loopT = (G.loopT || 0) + 1;
-  if (G.state === 'running') update();
-  draw();
-  drawDebug();
-  if (G.state === 'ready') start();                                            // AI auto-starts
-  else if (G.state === 'over' && G.loopT - (G.overAtLoop || 0) > 45) start();   // auto-restart to keep learning
+  if (mode === 'compare') {
+    cmpFrame(nowMs());
+  } else {
+    G.loopT = (G.loopT || 0) + 1;
+    if (G.state === 'running') update();
+    draw();
+    drawDebug();
+    if (G.state === 'ready') start();                                            // AI auto-starts
+    else if (G.state === 'over' && G.loopT - (G.overAtLoop || 0) > 45) start();   // auto-restart to keep learning
+  }
   requestAnimationFrame(loop);
 }
 
@@ -505,6 +734,14 @@ cv.addEventListener('pointerdown', () => {
 const realChk = document.getElementById('llm-real');
 if (realChk) realChk.addEventListener('change', () => { useRealLLM = realChk.checked; });
 
+// Mode toggle (single play <-> comparison). Default single.
+const msBtn = document.getElementById('mode-single');
+const mcBtn = document.getElementById('mode-compare');
+if (msBtn) msBtn.addEventListener('click', () => setMode('single'));
+if (mcBtn) mcBtn.addEventListener('click', () => setMode('compare'));
+const cmpRestart = document.getElementById('cmp-restart');
+if (cmpRestart) cmpRestart.addEventListener('click', () => cmpStart());
+
 // Test hooks (used by the headless harness; no effect in the browser).
 if (typeof window !== 'undefined') {
   window.TREX = {
@@ -514,6 +751,8 @@ if (typeof window !== 'undefined') {
     predictExpert, decide, controlStep, update, start, gameOver,
     scoreResult, actualOutcome, mockLLM, spawnObstacle, spawnCoin,
     setReal: v => { useRealLLM = v; },
+    // comparison mode
+    CMP, cmp, mulberry32, genCourse, makeRunner, cmpStep, cmpDecide, cmpProgress, cmpStart, setMode,
   };
 }
 
