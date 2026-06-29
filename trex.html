@@ -113,9 +113,11 @@ const INK = '#535353';
 
 const G = { state:'ready', speed:6, baseSpeed:6, score:0, hi:0, coins:0, t:0 };
 
-const dino = { x:50, y:GROUND_Y, w:44, h:DINO_H, vy:0, onGround:true };
+const dino = { x:50, y:GROUND_Y, w:44, h:DINO_H, vy:0, onGround:true, duckT:0 };
 const GRAVITY = 0.7;
 const JUMP_V = -12.5;
+const DUCK_H = 24;        // crouched hitbox height (vs standing DINO_H=47): passes UNDER bird_high
+const DUCK_TICKS = 22;    // frames the crouch is held after a duck command
 
 let obstacles = [];
 let coins = [];
@@ -130,7 +132,8 @@ function spawnObstacle() {
     const h = big ? 50 : 35;
     obstacles.push({ type:'cactus', x:W, y:GROUND - h, w, h });
   } else {
-    const heights = [GROUND - 70, GROUND - 45, GROUND - 25];
+    // high = head-height (duck UNDER it) / low = near-ground (jump OVER it)
+    const heights = [GROUND - 48, GROUND - 24];
     const y = heights[Math.floor(Math.random()*heights.length)];
     obstacles.push({ type:'bird', x:W, y, w:34, h:24, flap:0 });
   }
@@ -161,12 +164,15 @@ const VAL = { bad: 0, ok: 5, good: 10 };   // forced 3-way LLM choice -> number 
 const BETA = 0.04;                         // softmax sharpness for the responsibility update
 let useRealLLM = false;                    // false = rule-based mock; true = Cerebras API
 
-// Execution only (sets the jump velocity); not a decision.
+// Execution only (sets jump velocity / arms the crouch); not a decision.
 function applyAction(action) {
   if (action === 'jump' && dino.onGround) {
     dino.vy = JUMP_V;
     dino.onGround = false;
+  } else if (action === 'duck' && dino.onGround) {
+    dino.duckT = DUCK_TICKS;        // crouch in place (shortened hitbox)
   }
+  // 'run' = no-op
 }
 
 // Raw pixel access — stays INSIDE game code, never sent to the LLM.
@@ -182,7 +188,7 @@ function distBucket(dx) {
 function classifyFront(o) {
   if (!o) return 'none';
   if (o.type === 'cactus') return o.h >= 45 ? 'cactus_big' : 'cactus_small';
-  return o.y <= GROUND - 50 ? 'bird_high' : 'bird_low';   // high = run under; low = must jump
+  return o.y <= GROUND - 36 ? 'bird_high' : 'bird_low';   // high = duck under; low = jump over
 }
 
 // (1) DISCRETE state — the ONLY thing the LLM ever sees (no raw pixels).
@@ -198,19 +204,24 @@ function getWorldState() {
 }
 window.getWorldState = getWorldState;
 
-// --- (3) MOSAIC core: two forward+inverse experts -----------------------
-// jump expert {forward:"if I jump, outcome?", inverse:"jump"}
-// run  expert {forward:"if I run,  outcome?", inverse:"run"}
-const experts = [{ id: 'jump', action: 'jump' }, { id: 'run', action: 'run' }];
-const mosaic = { respJump: 0.5, respRun: 0.5, last: null };
+// --- (3) MOSAIC core: N forward+inverse experts (no count hardcoded) -----
+// Each expert = {forward:"if I <action>, outcome?", inverse:"<action>"}.
+// Adding an action = adding ONE entry here; the stage 1-4 code below loops
+// over `experts`, so the softmax and the command already generalize to N.
+const experts = [
+  { id: 'jump', action: 'jump' },   // "if I jump, outcome?"  -> jump
+  { id: 'run',  action: 'run'  },   // "if I run,  outcome?"  -> run
+  { id: 'duck', action: 'duck' },   // "if I duck, outcome?"  -> duck   <- the only structural addition
+];
+const mosaic = { resp: {}, last: null };
+experts.forEach(e => { mosaic.resp[e.id] = 1 / experts.length; });   // uniform prior over N
 
 // (2) Decision/result gating — one decision per obstacle, scored once.
 const decision = { active:false, obs:null, state:null, action:null,
-                   ready:false, coinsAt:0, predJump:null, predRun:null };
+                   ready:false, coinsAt:0, preds:null };
 function resetDecision() {
   decision.active = false; decision.obs = null; decision.state = null;
-  decision.action = null; decision.ready = false;
-  decision.predJump = null; decision.predRun = null;
+  decision.action = null; decision.ready = false; decision.preds = null;
 }
 
 // --- (5) LLM seam: mock (rule-based) now, real Cerebras when toggled. ----
@@ -219,14 +230,16 @@ async function callCerebrasLLM(prompt, temperature, meta) {
   return realCerebrasLLM(prompt, temperature);
 }
 // Rule-based stand-in returning the SAME forced 3-way JSON the real model must.
+// Correct action per situation (matches the real hitbox geometry):
+//   cactus_* -> jump,  bird_low -> jump (jump over),  bird_high -> duck (under it),
+//   none -> any. Every other action that decision predicts 'bad'.
 function mockLLM(meta) {
   const { state, action } = meta;
-  const groundHazard = (state.front === 'cactus_big' || state.front === 'cactus_small' || state.front === 'bird_low');
-  let safety;
-  if (state.front === 'none')      safety = 'good';
-  else if (action === 'jump')      safety = (state.front === 'bird_high') ? 'bad' : 'good'; // jump clears ground, hits high bird
-  else /* run */                   safety = groundHazard ? 'bad' : 'good';                 // run hits cacti / low bird
-  const reward = (state.coin_ahead && action === 'jump') ? 'good' : 'bad';                 // air coins need a jump
+  let safety = 'bad';
+  if (state.front === 'none')           safety = 'good';
+  else if (state.front === 'bird_high') safety = (action === 'duck') ? 'good' : 'bad';
+  else /* cactus_* or bird_low */       safety = (action === 'jump') ? 'good' : 'bad';
+  const reward = (state.coin_ahead && action === 'jump') ? 'good' : 'bad';   // air coins need a jump
   return JSON.stringify({ safety, reward });
 }
 async function realCerebrasLLM(prompt, temperature) {
@@ -266,15 +279,18 @@ async function predictExpert(state, action) {
   return parsePrediction(await callCerebrasLLM(buildPrompt(state, action), 0, { state, action }));
 }
 
-// Stage 4: responsibility-weighted command from the two forward predictions.
-// Each expert "votes" for its action with its predicted value, weighted by trust.
-function decide(predJump, predRun) {
-  const vJ = predJump.safety + predJump.reward;   // predicted value of jumping
-  const vR = predRun.safety  + predRun.reward;    // predicted value of running
-  const sJ = mosaic.respJump * vJ, sR = mosaic.respRun * vR;
-  const denom = sJ + sR;
-  const jumpProb = denom > 0 ? sJ / denom : 0.5;
-  return { action: jumpProb >= 0.5 ? 'jump' : 'run', jumpProb };
+// Stage 4: responsibility-weighted command over N experts (no hardcoded count).
+// Each expert votes for its action with score = responsibility × predicted value
+// (safety+reward); the command is the argmax. For N=2 this is exactly the old
+// jump-probability ≥ 0.5 rule — generalized, not changed.
+function decide(preds, resp) {
+  let best = null, bestScore = -Infinity;
+  for (const e of experts) {
+    const p = preds[e.id] || { safety: 0, reward: 0 };
+    const s = (resp[e.id] || 0) * (p.safety + p.reward);
+    if (s > bestScore) { bestScore = s; best = e; }
+  }
+  return { action: best ? best.action : 'run' };
 }
 
 // Decision point: fire ONE (async) decision for this obstacle.
@@ -282,37 +298,43 @@ function startDecision(obs) {
   decision.active = true; decision.obs = obs; decision.ready = false;
   decision.state = getWorldState(); decision.coinsAt = G.coins;
   const st = decision.state;
-  Promise.all([predictExpert(st, 'jump'), predictExpert(st, 'run')]).then(([pj, pr]) => {
+  // Stage 1: forward prediction from EVERY expert, in parallel (loops over N).
+  Promise.all(experts.map(e => predictExpert(st, e.action))).then(results => {
     if (!decision.active || decision.obs !== obs) return;        // obstacle changed; drop
-    decision.predJump = pj; decision.predRun = pr;
-    const cmd = decide(pj, pr);
+    const preds = {};
+    experts.forEach((e, i) => { preds[e.id] = results[i]; });
+    decision.preds = preds;
+    const cmd = decide(preds, mosaic.resp);
     decision.action = cmd.action; decision.ready = true;
-    mosaic.last = { front: st.front, state: st, predJump: pj, predRun: pr,
-      respJump: mosaic.respJump, respRun: mosaic.respRun, jumpProb: cmd.jumpProb,
+    mosaic.last = { front: st.front, preds, resp: Object.assign({}, mosaic.resp),
       command: cmd.action, result: mosaic.last ? mosaic.last.result : '—' };
   });
 }
 
 // (4) Deterministic actual outcome, computed by CODE at the result point.
+// safety/reward come from the REAL hitbox result of the EXECUTED action (crash?),
+// so duck/jump/run are all scored truthfully — no per-action special-casing.
 function actualOutcome(action, front, gotCoin, crashed) {
   return { safety: crashed ? 0 : 10, reward: gotCoin ? 10 : 0 };
 }
 function sq(x) { return x * x; }
-// Stages 2-3: squared error of each forward prediction vs actual -> softmax -> responsibilities.
+// Stages 2-3: squared error of each forward prediction vs actual -> softmax over
+// the N experts -> responsibilities. Loops over `experts`; nothing hardcoded to 2.
 function scoreResult(crashed) {
-  if (!decision.ready || !decision.predJump || !decision.predRun) return;
+  if (!decision.ready || !decision.preds) return;
   const gotCoin = G.coins > decision.coinsAt;
   const actual = actualOutcome(decision.action, decision.state.front, gotCoin, crashed);
-  const errJ = sq(decision.predJump.safety - actual.safety) + sq(decision.predJump.reward - actual.reward);
-  const errR = sq(decision.predRun.safety  - actual.safety) + sq(decision.predRun.reward  - actual.reward);
-  const wJ = Math.exp(-BETA * errJ), wR = Math.exp(-BETA * errR);
-  const z = (wJ + wR) || 1;
-  mosaic.respJump = wJ / z; mosaic.respRun = wR / z;
-  mosaic.last = { front: decision.state.front, state: decision.state,
-    predJump: decision.predJump, predRun: decision.predRun,
-    respJump: mosaic.respJump, respRun: mosaic.respRun, jumpProb: null,
-    command: decision.action,
-    result: (crashed ? 'CRASH' : 'PASS') + (gotCoin ? ' +coin' : '') + ' (eJ=' + errJ + ' eR=' + errR + ')' };
+  const w = {}, errs = {}; let z = 0;
+  for (const e of experts) {
+    const p = decision.preds[e.id] || { safety: 0, reward: 0 };
+    const err = sq(p.safety - actual.safety) + sq(p.reward - actual.reward);   // stage 2
+    errs[e.id] = err; w[e.id] = Math.exp(-BETA * err); z += w[e.id];           // stage 3 (softmax)
+  }
+  if (z > 0) for (const e of experts) mosaic.resp[e.id] = w[e.id] / z;
+  mosaic.last = { front: decision.state.front, preds: decision.preds,
+    resp: Object.assign({}, mosaic.resp), command: decision.action,
+    result: (crashed ? 'CRASH' : 'PASS') + (gotCoin ? ' +coin' : '') +
+            ' (' + experts.map(e => e.id[0] + ':' + errs[e.id]).join(' ') + ')' };
 }
 
 // Per-frame control seam (replaces the per-frame keyboard decide()).
@@ -327,10 +349,11 @@ function controlStep() {
   if (!decision.active && nextObs && distBucket(obstacleDx(nextObs)) <= DECISION_BUCKET) {
     startDecision(nextObs);
   }
-  // EXECUTION: a committed JUMP fires when the obstacle is close (well-timed).
-  if (decision.active && decision.ready && decision.action === 'jump' &&
-      dino.onGround && obstacleDx(decision.obs) <= Math.max(50, G.speed * 15)) {
-    applyAction('jump');
+  // EXECUTION: carry out the committed action (jump / duck / run) when the
+  // obstacle is close (well-timed). applyAction generalizes over actions.
+  if (decision.active && decision.ready && dino.onGround &&
+      obstacleDx(decision.obs) <= Math.max(50, G.speed * 15)) {
+    applyAction(decision.action);
   }
 }
 
@@ -343,6 +366,7 @@ function update() {
   dino.vy += GRAVITY;
   dino.y += dino.vy;
   if (dino.y >= GROUND_Y) { dino.y = GROUND_Y; dino.vy = 0; dino.onGround = true; }
+  if (dino.duckT > 0) dino.duckT--;     // duck: crouch decays after the command
 
   for (const o of obstacles) {
     o.x -= G.speed;
@@ -377,8 +401,13 @@ function update() {
 
 function hit(d, o) {
   const pad = 6;
+  // While ducking (on the ground), the hitbox is short and low -> passes UNDER
+  // a head-height bird_high, but still hits cacti / low birds.
+  const ducking = d.duckT > 0 && d.onGround;
+  const top = ducking ? (GROUND - DUCK_H) : d.y;
+  const h   = ducking ? DUCK_H : d.h;
   return d.x + pad < o.x + o.w && d.x + d.w - pad > o.x &&
-         d.y + pad < o.y + o.h && d.y + d.h - pad > o.y;
+         top + pad < o.y + o.h && top + h - pad > o.y;
 }
 
 function coinHit(d, c) {
@@ -425,7 +454,18 @@ function draw() {
 }
 
 function drawDino() {
-  const x = dino.x, y = dino.y;
+  const x = dino.x;
+  if (dino.duckT > 0 && dino.onGround) {
+    // crouched pose: short, low body (head tucked under head-height obstacles)
+    const y = GROUND - DUCK_H;
+    cx.fillRect(x+12, y, 32, 13);          // long low body
+    cx.clearRect(x+38, y+3, 4, 4);         // eye
+    cx.fillRect(x, y+5, 16, 8);            // tail
+    cx.fillRect(x+16, y+13, 8, 11);        // legs
+    cx.fillRect(x+30, y+13, 8, 11);
+    return;
+  }
+  const y = dino.y;
   cx.fillRect(x+18, y, 26, 22);
   cx.clearRect(x+36, y+5, 4, 4);
   cx.fillRect(x+10, y+18, 24, 18);
@@ -504,14 +544,18 @@ function drawDebug() {
   let html = '<b>MOSAIC control</b>';
   html += '<div class="row">front: <b>' + live.front + '</b></div>';
   html += '<div class="row">bucket ' + live.dist_bucket + ' · coin ' + (live.coin_ahead ? 'Y' : 'N') + '</div>';
-  html += '<div class="bars">resp jump <b>' + pct(mosaic.respJump) + '</b> · run <b>' + pct(mosaic.respRun) + '</b></div>';
-  html += '<div class="bar"><i style="width:' + pct(mosaic.respJump) + '"></i></div>';
+  // N-way responsibilities (one bar per expert) — loops over `experts`.
+  for (const e of experts) {
+    const r = mosaic.resp[e.id] || 0;
+    html += '<div class="row">resp ' + e.id + ' <b>' + pct(r) + '</b></div>';
+    html += '<div class="bar"><i style="width:' + pct(r) + '"></i></div>';
+  }
   if (L) {
     html += '<hr>last decision @ <b>' + L.front + '</b>';
-    html += '<div class="row">jump exp (s/r): ' + f(L.predJump) + '</div>';
-    html += '<div class="row">run  exp (s/r): ' + f(L.predRun) + '</div>';
-    html += '<div class="row">command: <b>' + (L.command || '?').toUpperCase() + '</b>' +
-            (L.jumpProb != null ? ' (p=' + L.jumpProb.toFixed(2) + ')' : '') + '</div>';
+    for (const e of experts) {
+      html += '<div class="row">' + e.id + ' exp (s/r): ' + f(L.preds && L.preds[e.id]) + '</div>';
+    }
+    html += '<div class="row">command: <b>' + (L.command || '?').toUpperCase() + '</b></div>';
     html += '<div class="row">result: ' + (L.result || '—') + '</div>';
   }
   html += '<div class="row" style="color:#9a9a9a">LLM: ' + (useRealLLM ? 'Cerebras' : 'mock') + '</div>';
@@ -576,14 +620,12 @@ function makeRunner(latencyMs, course) {
 function frontOf(o) {
   return classifyFront(o.kind === 'cactus' ? { type: 'cactus', h: o.h, y: 0 } : { type: 'bird', y: o.y });
 }
-// REUSE the MOSAIC control as-is (classifyFront + mockLLM + decide) to pick the
-// action. Same course + same math -> both runners judge identically (correctly).
+// Comparison uses its ORIGINAL 2-action policy (jump/run) and is intentionally
+// decoupled from the single-game duck expert: high flyer -> run under it,
+// everything else -> jump. (Self-contained so the single-game's new duck-aware
+// mock/decide cannot change comparison behavior. Same course -> both identical.)
 function cmpDecide(o) {
-  const obstacle = o.kind === 'cactus' ? { type: 'cactus', h: o.h, y: 0 } : { type: 'bird', y: o.y };
-  const st = { front: classifyFront(obstacle), dist_bucket: 0, coin_ahead: false, on_ground: true };
-  const pj = parsePrediction(mockLLM({ state: st, action: 'jump' }));
-  const pr = parsePrediction(mockLLM({ state: st, action: 'run' }));
-  return decide(pj, pr).action;
+  return frontOf(o) === 'bird_high' ? 'run' : 'jump';
 }
 // Advance one runner by virtual elapsed dt (ms). World HOLDS while deciding.
 // (Pacing only scales how dt/now relate to real time; the dynamics are fixed.)
@@ -742,7 +784,7 @@ function start() {
   G.state = 'running';
   G.score = 0; G.speed = G.baseSpeed; G.coins = 0; G.t = 0;
   obstacles = []; coins = []; spawnTimer = 200; coinTimer = 150;
-  dino.y = GROUND_Y; dino.vy = 0; dino.onGround = true;
+  dino.y = GROUND_Y; dino.vy = 0; dino.onGround = true; dino.duckT = 0;
   resetDecision();                 // responsibilities (mosaic.*) persist across runs
   overlay.textContent = '';
 }
@@ -791,7 +833,8 @@ if (typeof window !== 'undefined') {
     get obstacles() { return obstacles; }, get coins() { return coins; },
     getWorldState, classifyFront, distBucket, obstacleDx, buildPrompt, parsePrediction,
     predictExpert, decide, controlStep, update, start, gameOver,
-    scoreResult, actualOutcome, mockLLM, spawnObstacle, spawnCoin,
+    scoreResult, actualOutcome, mockLLM, spawnObstacle, spawnCoin, hit, applyAction,
+    DUCK_H, GROUND, GROUND_Y, DINO_H,
     setReal: v => { useRealLLM = v; },
     // comparison mode
     CMP, cmp, mulberry32, genCourse, makeRunner, cmpStep, cmpDecide, cmpProgress, cmpStart, setMode,
