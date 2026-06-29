@@ -1497,6 +1497,21 @@ const MCFG = {
   autoRestartMs: 2500, // when AI is on, auto-restart after the timer ends
 };
 
+// --- Decision-rate limiting (Cerebras ~100 requests/minute) ----------------
+// Each decision fires up to 3 module calls per controller, and the comparison
+// mode runs TWO controllers (6 calls/decision). Deciding every game tick blows
+// past the limit (429s). So we decide at most once per DECISION_INTERVAL_MS of
+// GAME time and let the game keep running on the last chosen action in between.
+//
+// Request rate ≈ (calls per decision) / DECISION_INTERVAL_MS. To stay under
+// 100 req/min:  single panel (3 calls)  -> interval >= ~1800 ms
+//               comparison  (6 calls)   -> interval >= ~3600 ms
+// 700 ms (≈ the 500–800 ms target) is the floor for spacing; raise this
+// constant toward the values above if you still see 429s, especially in the
+// comparison view. One tunable knob, applied to BOTH modes.
+const DECISION_INTERVAL_MS = 700;   // min game-time between LLM decisions
+const RATELIMIT_BACKOFF_MS = 600;   // brief wait before a single retry on HTTP 429
+
 // The three expert personalities. Same model, different system prompts.
 const PERSONA_CORE =
   "You control a penguin in a 3-lane endless runner. Each decision you pick ONE action:\n" +
@@ -1553,9 +1568,16 @@ async function mosaicChat(base, key, model, system, user) {
     body: JSON.stringify(body),
   });
   const base_body = { model, messages, temperature: MCFG.temperature, max_tokens: MCFG.maxTokens };
+  // One brief backoff-and-retry on HTTP 429 (rate limit) so a transient burst
+  // doesn't break a decision. Other failures fall through to the caller.
+  const postRetrying = async (body) => {
+    let r = await post(body);
+    if (r.status === 429) { await sleep(RATELIMIT_BACKOFF_MS); r = await post(body); }
+    return r;
+  };
   // Prefer JSON mode; if the endpoint rejects it, retry without (parser is tolerant).
-  let res = await post({ ...base_body, response_format: { type: 'json_object' } });
-  if (!res.ok && (res.status === 400 || res.status === 422)) res = await post(base_body);
+  let res = await postRetrying({ ...base_body, response_format: { type: 'json_object' } });
+  if (!res.ok && (res.status === 400 || res.status === 422)) res = await postRetrying(base_body);
   if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 160));
   const data = await res.json();
   const content = data.choices && data.choices[0] && data.choices[0].message
@@ -1648,6 +1670,24 @@ function scorePredictions(modules, actual, cfg = MCFG) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// DECISION_INTERVAL_MS expressed in game ticks (game time, not wall-clock).
+function decisionIntervalTicks() {
+  return Math.max(1, Math.round(DECISION_INTERVAL_MS / CONFIG.tickMs));
+}
+// Hold until DECISION_INTERVAL_MS of game time has elapsed since `startTick`,
+// so successive LLM decisions are spaced out (capping the request rate). The
+// game loop keeps stepping on its own animation frames with the last chosen
+// action while we wait; bail early if the run ends/pauses or it's stopped.
+async function paceDecision(getGame, startTick, stillActive) {
+  const target = startTick + decisionIntervalTicks();
+  while (stillActive()) {
+    const g = getGame();
+    if (!g || g.over || g.paused) break;
+    if (g.tick >= target) break;
+    await sleep(CONFIG.tickMs);
+  }
+}
+
 // --- The async control loop. Decoupled from the 60fps game loop: the game
 //     keeps running with the last action between (fast) LLM decisions. ------
 async function mosaicLoop() {
@@ -1696,7 +1736,9 @@ async function mosaicLoop() {
 
     if (mosaic.lastError) { setStatus('merr', 'error'); }
     else { setStatus('mrun', 'running'); }
-    await sleep(MCFG.minDecisionMs);
+    // Pace decisions: hold the last chosen action until the decision interval
+    // elapses (game time), so we stay under the Cerebras request-rate limit.
+    await paceDecision(() => game, before.tick, () => mosaic.enabled);
   }
   setStatus('midle', 'stopped');
 }
@@ -1964,7 +2006,9 @@ async function controllerLoop(ctrl, getGame) {
     const actual = { coinGain: g.coins - before.coins, freeze: sawFreeze };
     scoreSubset(ctrl.modules, evaluated, actual, CMP);
     renderCmpSide(ctrl);
-    await sleep(CMP.minDecisionMs);
+    // Pace decisions: hold the last chosen action until the decision interval
+    // elapses (game time), so both controllers together stay under the limit.
+    await paceDecision(getGame, before.tick, () => cmp.active && getGame() === g);
   }
   ctrl.running = false;
 }
