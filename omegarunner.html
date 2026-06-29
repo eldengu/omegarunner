@@ -101,10 +101,15 @@
   }
   #m-start.on { background: #c0392b; border-color: #c0392b; }
   .mod {
-    display: grid; grid-template-columns: 150px 64px 1fr 64px; align-items: center;
+    display: grid; grid-template-columns: 140px 58px 92px 1fr 46px; align-items: center;
     gap: 10px; padding: 6px 8px; border-radius: 6px; margin-bottom: 5px;
     background: #f3f9ff; border: 1px solid #dcebf8;
   }
+  .mod .mprior {
+    font-size: 10px; text-align: center; font-variant-numeric: tabular-nums;
+    color: #4a6c5a; background: #eaf6ef; border-radius: 4px; padding: 2px 0;
+  }
+  .mod .mprior.na { color: #9bb0c4; background: #eef3f8; }
   .mod.win { background: #fff7d6; border-color: #ffd23d; box-shadow: 0 0 0 2px #ffe79a inset; }
   .mod .mname { font-weight: 700; font-size: 12px; color: #10233f; }
   .mod .mpersona { font-size: 10px; color: #6b8aa6; font-weight: 400; }
@@ -148,13 +153,15 @@
   .cmp-stats .cmp-score b { color: #1769b0; }
   .cmp-mods { display: flex; flex-direction: column; gap: 4px; }
   .cmod {
-    display: grid; grid-template-columns: 74px 52px 1fr 18px; align-items: center; gap: 8px;
+    display: grid; grid-template-columns: 66px 48px 56px 1fr 18px; align-items: center; gap: 7px;
     font-size: 11px; padding: 3px 6px; border-radius: 5px; background: #eef6fd; border: 1px solid #e0ecf6;
   }
   .cmod.win { background: #fff7d6; border-color: #ffd23d; }
   .cmod.skipped { opacity: 0.4; }
   .cmod .cmname { font-weight: 700; color: #10233f; }
   .cmod .cmact { font-family: monospace; font-weight: 700; color: #1769b0; text-align: center; }
+  .cmod .cmprior { font-size: 9.5px; text-align: center; color: #4a6c5a; font-variant-numeric: tabular-nums; }
+  .cmod .cmprior.na { color: #9bb0c4; }
   .cmmatch { text-align: center; font-weight: 700; }
   .cmmatch.ok { color: #1f7a3a; } .cmmatch.no { color: #c0392b; } .cmmatch.na { color: #9bb0c4; }
   .cmp-note {
@@ -212,12 +219,18 @@
         </div>
         <div class="hint" style="margin:2px 0 8px">
           Three experts (same model, different system prompts), each a forward+inverse
-          <b>pair</b>. Inverse = propose an action; forward = predict the next state for
-          <i>each</i> action. The executed action is the responsibility-weighted vote; then
-          every expert's forward model is scored on the <b>same executed action</b> and
-          responsibility λ = softmax(−error/σ²) flows to whoever predicts reality best.
-          The right column shows each expert's forward-prediction error (hover for the
-          running average that drives λ).
+          <b>pair</b>, with a <b>responsibility predictor (RP)</b>.
+          <b>Phase 1 — select:</b> from the situation signature (sensory cues only) the RP
+          looks up each expert's learned forward-accuracy → λ; the executed action is the
+          λ-weighted vote over their inverse proposals.
+          <b>Phase 2 — learn:</b> the deterministic game gives the exact outcome; code
+          scores each expert's forward prediction and trains the RP for this situation.
+          Columns show <b>prior</b> (RP accuracy used to select, with sample count),
+          <b>λ</b> (the bar), and <b>e</b> (forward error this tick, used to learn).
+        </div>
+        <div class="hint" style="margin:0 0 8px">
+          situation signature: <code id="m-sig" style="font-weight:700;color:#10233f">—</code>
+          <span style="color:#9bb0c4">(L·C·R lanes relative to you: G=hurdle B=barrier C=coin .=clear X=wall; g/a=ground/air)</span>
         </div>
         <div id="m-modules"></div>
         <pre id="m-log" class="mlog"></pre>
@@ -1476,40 +1489,116 @@ window.addEventListener('keydown', (ev) => {
 });
 
 /* =========================================================================
-   MOSAIC controller (Wolpert & Kawato 1998) over an LLM.
+   MOSAIC controller (Wolpert & Kawato 1998) over an LLM, WITH a responsibility
+   predictor (RP). N modules ("experts"), each the SAME model (gemma-4-31b on
+   Cerebras) with a DIFFERENT system prompt / personality, each a forward+inverse
+   PAIR. The RP is what lets the controller pick "the right expert for THIS
+   situation" instead of just the overall-best one.
 
-   N modules ("experts"), each the SAME model (gemma-4-31b on Cerebras) with a
-   DIFFERENT system prompt / personality. Each module is a forward+inverse PAIR.
-   Every decision:
-     1. INVERSE model: every module proposes an action.
-     2. The EXECUTED action is the responsibility-weighted vote over those
-        proposals (λ-weighted).
-     3. FORWARD model: every module also predicts the NEXT state for the action
-        that will ACTUALLY execute (coin gained?, freeze?, resulting lane &
-        posture). Because all modules are scored on the SAME executed action,
-        every module's prediction is validated against the one reality that
-        unfolds — fixing the old bug where a module could only be checked on
-        its own (often un-executed) proposal.
-     4. After the tick resolves we compute each module's forward-prediction
-        ERROR vs the actual next state, fold it into a running (EMA) error that
-        PERSISTS across decisions and runs, and set responsibility
-        λ_i = softmax(-errEMA_i / σ²). Responsibility flows to whichever
-        forward model best predicts how the world actually changes — not to
-        whoever is most pessimistic.
+   The chicken-and-egg fix: forward-prediction error only exists AFTER an action
+   executes, so it CANNOT pick the action in the same tick. So selection uses the
+   RP PRIOR (sensory cues only); the forward error is used afterward to TRAIN it.
+
+   PHASE 1 — SELECT (before acting, sensory cues only):
+     a. Derive a discretized SITUATION SIGNATURE from the sensory state: the
+        category (ground-hurdle / barrier / coin / clear / off-track) of each
+        lane relative to the player's lane, plus on-ground/airborne.
+     b. RP PRIOR: look up each module's past forward-accuracy for this signature
+        from a persistent, code-kept record (hit/n per signature per module).
+        Unseen signatures start uniform (Beta(1,1) smoothing).
+     c. λ_i = normalized RP prior across modules. The EXECUTED action is the
+        λ-weighted vote over the modules' INVERSE proposals. (Inverse proposals
+        + forward predictions are produced by the LLM in parallel — Promise.all,
+        the Cerebras-speed point — but λ does NOT depend on the LLM.)
+
+   PHASE 2 — SCORE & LEARN (after the action executes):
+     d. The game is deterministic, so CODE computes the actual next state exactly
+        (coins gained, freeze, resulting lane/posture) — the code, not the LLM,
+        decides who was right.
+     e. Score each module's LLM forward prediction for the EXECUTED action vs that
+        ground truth, then increment the RP record for the decision's signature
+        (n += 1, hit += matched). This sharpens the per-situation prior next time.
+
+   Persistence: the situation→accuracy record persists across decisions and 60s
+   runs (and across reloads via localStorage); it is NEVER reset. As rounds
+   accumulate the RP gives sharper per-situation weights.
 
    This NEVER touches game logic. It only writes to `pendingAction` (the same
    buffer the keyboard uses) — exactly through the existing agentStep seam.
    ========================================================================= */
 const MCFG = {
   settleTicks: 14,     // game ticks to wait before scoring a prediction
-  fwdSigma2: 0.6,      // softmax temperature σ² in λ_i = softmax(-errEMA_i/σ²)
-  fwdErrEMA: 0.35,     // smoothing of the running forward-error (persists across runs)
   fwdMaxErr: 4,        // max forward error (coin+freeze+lane+posture); a failed call = this
   temperature: 0.4,
   maxTokens: 220,      // room for the per-action forward predictions
   minDecisionMs: 50,   // small breather between decisions
   autoRestartMs: 2500, // when AI is on, auto-restart after the timer ends
 };
+
+// --- Responsibility predictor (RP): situation -> per-module forward accuracy.
+// A persistent, code-kept record that drives PHASE-1 selection. Keyed by a
+// discretized situation signature; each entry holds {hit, n} per module id.
+// Persists across decisions, across 60s runs, and (via localStorage) reloads.
+const RPCFG = {
+  nearTiles: 8,        // a lane "has" a hazard/coin only within this many tiles ahead
+  priorA: 1, priorB: 1,// Beta(1,1) smoothing -> unseen module accuracy 0.5 (uniform λ)
+  storeKey: 'mosaicRP.v1',
+};
+const rp = { table: Object.create(null), loaded: false };
+
+function rpLoad() {
+  if (rp.loaded) return; rp.loaded = true;
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const raw = localStorage.getItem(RPCFG.storeKey);
+    const o = raw ? JSON.parse(raw) : null;
+    if (o && o.table) rp.table = o.table;
+  } catch (e) {}
+}
+function rpSave() {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(RPCFG.storeKey, JSON.stringify({ table: rp.table }));
+  } catch (e) {}
+}
+function rpEntry(sig, id) {
+  let row = rp.table[sig]; if (!row) row = rp.table[sig] = {};
+  let e = row[id]; if (!e) e = row[id] = { hit: 0, n: 0 };
+  return e;
+}
+// Posterior-mean forward accuracy of module `id` in situation `sig` (Beta prior).
+function rpAccuracy(sig, id) {
+  const row = rp.table[sig]; const e = row && row[id];
+  const hit = e ? e.hit : 0, n = e ? e.n : 0;
+  return (hit + RPCFG.priorA) / (n + RPCFG.priorA + RPCFG.priorB);
+}
+
+// Category of the nearest entity ahead in a lane, within the near window. Mirrors
+// encodeState's "nearest ahead" logic WITHOUT modifying encodeState.
+function laneCategory(g, lane) {
+  let nearest = null;
+  for (const e of g.entities) {
+    if (e.lane !== lane || e.collected || e.resolved) continue;
+    if (e.z < CONFIG.zPlayer - 0.02) continue; // already passed
+    if (!nearest || e.z < nearest.z) nearest = e;
+  }
+  if (!nearest) return '.';
+  const ahead = Math.max(0, Math.round((nearest.z - CONFIG.zPlayer) / 0.12));
+  if (ahead > RPCFG.nearTiles) return '.';
+  return nearest.kind === KINDS.GROUND ? 'G'
+       : nearest.kind === KINDS.BARRIER ? 'B' : 'C';
+}
+// Discretized situation signature: nearest-entity category of [left,center,right]
+// lanes RELATIVE to the player (off-track = 'X'), plus posture (g/a). Sensory
+// cues only — no LLM, no outcome — so it is available at SELECTION time.
+function situationSignature(g) {
+  let s = '';
+  for (const d of [-1, 0, 1]) {
+    const l = g.lane + d;
+    s += (l < 0 || l >= CONFIG.lanes) ? 'X' : laneCategory(g, l);
+  }
+  return s + (isAirborne(g) ? 'a' : 'g');
+}
 
 // --- Decision-rate limiting (Cerebras ~100 requests/minute) ----------------
 // Each decision fires up to 3 module calls per controller, and the comparison
@@ -1562,11 +1651,13 @@ const mosaic = {
   enabled: false,
   modules: MODULE_DEFS.map(d => ({
     ...d, resp: 1 / MODULE_DEFS.length,
-    action: 'stay', fwd: null, matched: null, fwdErr: null, errEMA: 0, latency: 0, ok: true,
+    action: 'stay', fwd: null, matched: null, fwdErr: null,
+    rpAcc: null, rpN: 0, latency: 0, ok: true,
   })),
   decisions: 0,
   lastWinner: -1,
   lastError: '',
+  sig: '',
   overAt: 0,
 };
 
@@ -1703,32 +1794,40 @@ function forwardError(m, executedAction, beforeLane, actual, cfg = MCFG) {
   return err;
 }
 
-// --- MOSAIC responsibility update (Wolpert & Kawato 1998). -------------------
-// Score each module's forward model on the executed action, fold the error into
-// a running EMA that PERSISTS across decisions/runs, then set
-//   λ_i = softmax(-errEMA_i / σ²)
-// over the full committee. `scored` is the subset evaluated this decision (all
-// modules in the single panel; the evaluated subset in comparison mode). Modules
-// not scored keep their persisted errEMA, so they retain a sensible λ.
-function updateResponsibility(allModules, scored, beforeLane, actual, cfg = MCFG) {
+// --- PHASE 1: SELECT. Set λ from the RP prior for the current signature. ----
+// Sensory cues only — no LLM, no outcome. λ_i = normalized posterior-mean
+// forward-accuracy for this signature; unseen signatures -> uniform. Stores the
+// raw prior (rpAcc) and sample count (rpN) on each module for display.
+function rpSelect(modules, sig) {
+  rpLoad();
+  let sum = 0; const acc = [];
+  for (const m of modules) { const a = rpAccuracy(sig, m.id); acc.push(a); sum += a; }
+  modules.forEach((m, i) => {
+    m.rpAcc = acc[i];
+    m.rpN = (rp.table[sig] && rp.table[sig][m.id]) ? rp.table[sig][m.id].n : 0;
+    m.resp = sum > 0 ? acc[i] / sum : 1 / modules.length; // final λ used for the vote
+  });
+  return modules;
+}
+
+// --- PHASE 2: SCORE & LEARN. CODE-truth scoring + RP update. ------------------
+// `actual` is the deterministic next state computed by the game. For each scored
+// module we compute its forward error for the EXECUTED action (code decides who
+// was right) and fold a binary hit into the RP record for the decision's
+// signature, sharpening the prior for that situation next time. `scored` = all
+// modules (single panel) or the evaluated subset (comparison seq mode).
+function rpLearn(modules, scored, sig, beforeLane, actual, cfg = MCFG) {
   const inSet = new Set(scored);
-  for (const m of allModules) {
+  for (const m of modules) {
     if (!inSet.has(m)) { m.matched = null; continue; }
     const err = forwardError(m, actual.action, beforeLane, actual, cfg);
     m.fwdErr = err;
-    m.errEMA = (typeof m.errEMA === 'number')
-      ? (1 - cfg.fwdErrEMA) * m.errEMA + cfg.fwdErrEMA * err
-      : err;
     m.matched = err === 0;
+    const e = rpEntry(sig, m.id);
+    e.n += 1; if (m.matched) e.hit += 1;
   }
-  let sum = 0; const ex = [];
-  for (const m of allModules) {
-    const e = (typeof m.errEMA === 'number') ? m.errEMA : cfg.fwdMaxErr;
-    const v = Math.exp(-e / cfg.fwdSigma2);
-    ex.push(v); sum += v;
-  }
-  if (sum > 0) allModules.forEach((m, i) => { m.resp = ex[i] / sum; });
-  return allModules;
+  rpSave();
+  return modules;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -1769,12 +1868,18 @@ async function mosaicLoop() {
     const before = { coins: game.coins, lane: game.lane, tick: game.tick, frozen: game.freezeT > 0 };
     const stateText = game.lastState || encodeState(game);
 
-    // 1) INVERSE (propose) + FORWARD (per-action prediction) for all modules,
-    //    in PARALLEL (the Cerebras-speed point).
+    // PHASE 1a) SELECT: discretized situation signature (sensory cues only) and
+    //    λ from the RP prior — computed BEFORE acting, independent of the LLM.
+    const sig = situationSignature(game);
+    mosaic.sig = sig;
+    rpSelect(mosaic.modules, sig);
+
+    // PHASE 1b) INVERSE (propose) + FORWARD (per-action prediction) for all
+    //    modules, in PARALLEL (the Cerebras-speed point).
     await Promise.all(mosaic.modules.map(m => callModule(m, conn, stateText)));
 
-    // 2) Responsibility-weighted vote over the INVERSE proposals -> executed
-    //    action, applied via the agentStep seam.
+    // PHASE 1c) λ-weighted vote over the INVERSE proposals -> executed action,
+    //    applied via the agentStep seam.
     const { action, winnerIdx } = chooseAction(mosaic.modules);
     pendingAction = action;
     mosaic.lastWinner = winnerIdx;
@@ -1782,8 +1887,8 @@ async function mosaicLoop() {
     renderModules(winnerIdx, action);
     logDecision(action, winnerIdx);
 
-    // 3) Wait for the action to resolve, sampling whether a freeze / airborne
-    //    state occurred (the actual next state for the FORWARD scoring).
+    // PHASE 2a) Let the action resolve; the game (deterministic) gives the exact
+    //    next state — sample freeze / airborne; coins & lane read directly.
     let sawFreeze = false, sawAir = false;
     const target = game.tick + MCFG.settleTicks;
     while (game.tick < target && mosaic.enabled && !game.over && !game.paused) {
@@ -1794,8 +1899,9 @@ async function mosaicLoop() {
     if (!before.frozen && game.freezeT > 0) sawFreeze = true;
     if (isAirborne(game)) sawAir = true;
 
-    // 4) Forward-prediction error of EVERY module on the EXECUTED action ->
-    //    running responsibility update (λ = softmax(-errEMA/σ²)).
+    // PHASE 2b) SCORE & LEARN: code scores each module's forward prediction for
+    //    the EXECUTED action vs this ground truth, then trains the RP record for
+    //    `sig` (the situation the decision was made in).
     const actual = {
       action,
       coinGain: game.coins - before.coins,
@@ -1803,7 +1909,7 @@ async function mosaicLoop() {
       lane: game.lane,
       airborne: sawAir,
     };
-    updateResponsibility(mosaic.modules, mosaic.modules, before.lane, actual);
+    rpLearn(mosaic.modules, mosaic.modules, sig, before.lane, actual);
     renderModules(mosaic.lastWinner, action, actual);
 
     if (mosaic.lastError) { setStatus('merr', 'error'); }
@@ -1843,6 +1949,7 @@ function buildModulesUI() {
       '<div><div class="mname">' + m.name + '</div>' +
       '<div class="mpersona">' + m.persona + '</div></div>' +
       '<div class="maction" id="mact-' + i + '">· stay</div>' +
+      '<div class="mprior na" id="mprior-' + i + '" title="RP prior: this module&#39;s learned forward-accuracy for the current situation (drives selection)">prior —</div>' +
       '<div class="mbarwrap"><div class="mbar" id="mbar-' + i + '"></div>' +
       '<span class="mbarpct" id="mpct-' + i + '"></span></div>' +
       '<div class="mmatch na" id="mmatch-' + i + '">—</div>';
@@ -1851,24 +1958,37 @@ function buildModulesUI() {
   renderModules(-1, null);
 }
 function renderModules(winnerIdx, action, actual) {
+  const sigEl = document.getElementById('m-sig');
+  if (sigEl) sigEl.textContent = mosaic.sig || '—';
   mosaic.modules.forEach((m, i) => {
     const row = document.getElementById('mod-' + i);
     const act = document.getElementById('mact-' + i);
+    const pr = document.getElementById('mprior-' + i);
     const bar = document.getElementById('mbar-' + i);
     const pct = document.getElementById('mpct-' + i);
     const mt = document.getElementById('mmatch-' + i);
     if (!row) return;
     row.classList.toggle('win', i === winnerIdx && winnerIdx >= 0);
     if (act) act.textContent = ACTION_GLYPH[m.action] || m.action;
-    if (bar) bar.style.width = (m.resp * 100).toFixed(1) + '%';
-    if (pct) pct.textContent = (m.resp * 100).toFixed(0) + '%';
+    if (pr) {
+      // RP prior used to SELECT: per-situation forward accuracy + sample count.
+      if (m.rpAcc == null) { pr.className = 'mprior na'; pr.textContent = 'prior —'; }
+      else {
+        pr.className = 'mprior' + (m.rpN > 0 ? '' : ' na');
+        pr.textContent = (m.rpAcc * 100).toFixed(0) + '% n' + m.rpN;
+        pr.title = 'RP prior for situation "' + (mosaic.sig || '?') + '": accuracy ' +
+          (m.rpAcc * 100).toFixed(1) + '% over n=' + m.rpN + ' past samples';
+      }
+    }
+    if (bar) bar.style.width = (m.resp * 100).toFixed(1) + '%';   // final λ
+    if (pct) pct.textContent = 'λ' + (m.resp * 100).toFixed(0) + '%';
     if (mt) {
-      // Forward-prediction error this decision + the running EMA that drives λ.
+      // Forward-prediction error this tick (used to LEARN).
       if (m.fwdErr == null) { mt.className = 'mmatch na'; mt.textContent = '—'; }
       else {
         mt.className = 'mmatch ' + (m.fwdErr === 0 ? 'ok' : 'no');
-        mt.textContent = 'e' + m.fwdErr + ' μ' + (m.errEMA || 0).toFixed(1);
-        mt.title = 'forward-error this step=' + m.fwdErr + ', running μ=' + (m.errEMA || 0).toFixed(2);
+        mt.textContent = 'e' + m.fwdErr;
+        mt.title = 'forward-prediction error this tick = ' + m.fwdErr + ' (0 = exact match)';
       }
     }
   });
@@ -1878,9 +1998,10 @@ function logDecision(action, winnerIdx) {
   const parts = mosaic.modules.map(m => {
     const f = (m.fwd && m.fwd[action]) || { coin: 0, freeze: false };
     return `${m.name}:${m.action}${f.coin ? '$' : ''}${f.freeze ? '!' : ''}` +
-      `(λ${(m.resp * 100).toFixed(0)}%${m.fwdErr != null ? ' e' + m.fwdErr : ''})`;
+      `(prior${(m.rpAcc != null ? (m.rpAcc * 100).toFixed(0) : '—')}% λ${(m.resp * 100).toFixed(0)}%` +
+      `${m.fwdErr != null ? ' e' + m.fwdErr : ''})`;
   });
-  logLine(`#${mosaic.decisions} -> ${action.toUpperCase()} [win:${w ? w.name : '?'}]  ` + parts.join('  '));
+  logLine(`#${mosaic.decisions} [${mosaic.sig}] -> ${action.toUpperCase()} [win:${w ? w.name : '?'}]  ` + parts.join('  '));
 }
 function logLine(s) {
   const el = document.getElementById('m-log');
@@ -1947,8 +2068,6 @@ if (typeof document !== 'undefined') {
 const CMP = {
   budgetMs: 450,      // LEFT per-decision wall-clock budget (tunable)
   settleTicks: MCFG.settleTicks,
-  fwdSigma2: MCFG.fwdSigma2,
-  fwdErrEMA: MCFG.fwdErrEMA,
   fwdMaxErr: MCFG.fwdMaxErr,
   minDecisionMs: 30,
 };
@@ -1956,7 +2075,8 @@ const CMP = {
 function makeModuleSet() {
   return MODULE_DEFS.map(d => ({
     ...d, resp: 1 / MODULE_DEFS.length,
-    action: 'stay', fwd: null, matched: null, fwdErr: null, errEMA: 0, latency: 0, ok: true,
+    action: 'stay', fwd: null, matched: null, fwdErr: null,
+    rpAcc: null, rpN: 0, latency: 0, ok: true,
     tokps: 0, compTokens: 0, compTime: 0,
   }));
 }
@@ -1981,15 +2101,16 @@ function makeController(side, mode) {
     freezes: 0,
     prevFreeze: false,
     lastAction: 'stay',
+    sig: '',
     evaluatedIds: new Set(),
   };
 }
 
-// Comparison-mode scoring is the SAME forward-model responsibility update used
-// by the single panel — only the EVALUATED subset (those actually called this
-// decision) is scored; un-evaluated modules keep their persisted errEMA and λ.
-// (updateResponsibility handles both the per-module forward error and the
-//  softmax over the full committee.)
+// Comparison mode uses the SAME RP machinery as the single panel and shares the
+// one global `rp` record (RP accuracy is a property of the experts + situation,
+// not of the evaluation strategy). rpSelect sets λ from the prior before acting;
+// rpLearn trains the record afterward — only over the EVALUATED subset (seq mode
+// may skip modules under its budget); skipped modules keep their prior λ.
 
 // LEFT: sequential evaluation under a per-decision wall-clock budget.
 // Calls modules one at a time; after each returns, stop starting NEW calls
@@ -2028,6 +2149,12 @@ async function controllerLoop(ctrl, getGame) {
     const stateText = g.lastState || encodeState(g);
     ctrl.lastError = ''; // clear; repopulated by onErr if a call fails this decision
 
+    // PHASE 1 — SELECT: situation signature + λ from the RP prior (sensory cues
+    // only, before acting). Shared global RP record.
+    const sig = situationSignature(g);
+    ctrl.sig = sig;
+    rpSelect(ctrl.modules, sig);
+
     // Evaluate modules per this controller's strategy (these are the REAL
     // gemma-4-31b calls — sequential-under-budget vs Promise.all).
     const evaluated = ctrl.mode === 'seq'
@@ -2048,7 +2175,8 @@ async function controllerLoop(ctrl, getGame) {
     ctrl.aggTokps = time > 0 ? toks / time
       : (voters.length ? voters.reduce((s, m) => s + (m.tokps || 0), 0) / voters.length : 0);
 
-    // Decision = responsibility-weighted vote over the valid INVERSE proposals.
+    // Decision = λ-weighted vote (λ from the RP prior) over the valid INVERSE
+    // proposals.
     const { action, winnerIdx } = voters.length
       ? chooseActionAmong(ctrl.modules, voters)
       : { action: 'stay', winnerIdx: -1 };
@@ -2061,8 +2189,9 @@ async function controllerLoop(ctrl, getGame) {
 
     renderCmpSide(ctrl);
 
-    // Settle, then score the FORWARD models of the evaluated modules on the
-    // EXECUTED action (sampling the actual next state: freeze / airborne).
+    // PHASE 2 — settle, then SCORE & LEARN: the deterministic game gives the
+    // exact next state; code scores the evaluated modules' forward predictions
+    // on the EXECUTED action and trains the shared RP for `sig`.
     let sawFreeze = false, sawAir = false;
     const target = g.tick + CMP.settleTicks;
     while (getGame() === g && g.tick < target && cmp.active && !g.over && !g.paused) {
@@ -2073,7 +2202,7 @@ async function controllerLoop(ctrl, getGame) {
     if (!before.frozen && g.freezeT > 0) sawFreeze = true;
     if (isAirborne(g)) sawAir = true;
     const actual = { action, coinGain: g.coins - before.coins, freeze: sawFreeze, lane: g.lane, airborne: sawAir };
-    updateResponsibility(ctrl.modules, evaluated, before.lane, actual, CMP);
+    rpLearn(ctrl.modules, evaluated, sig, before.lane, actual, CMP);
     renderCmpSide(ctrl);
     // Pace decisions: hold the last chosen action until the decision interval
     // elapses (game time), so both controllers together stay under the limit.
@@ -2152,6 +2281,7 @@ function buildCmpModules(side, ctrl) {
     row.innerHTML =
       '<span class="cmname">' + m.name + '</span>' +
       '<span class="cmact" id="cmact-' + side + '-' + i + '">·</span>' +
+      '<span class="cmprior na" id="cmprior-' + side + '-' + i + '" title="RP prior accuracy for the current situation">—</span>' +
       '<span class="mbarwrap" style="height:12px"><span class="mbar" id="cmbar-' + side + '-' + i + '"></span></span>' +
       '<span class="cmmatch na" id="cmmatch-' + side + '-' + i + '">—</span>';
     host.appendChild(row);
@@ -2166,17 +2296,27 @@ function renderCmpSide(ctrl) {
     row.classList.toggle('win', i === ctrl.winnerIdx);
     row.classList.toggle('skipped', !evaluated);
     const act = document.getElementById('cmact-' + side + '-' + i);
+    const pr = document.getElementById('cmprior-' + side + '-' + i);
     const bar = document.getElementById('cmbar-' + side + '-' + i);
     const mt = document.getElementById('cmmatch-' + side + '-' + i);
     if (act) act.textContent = evaluated ? (ACTION_GLYPH[m.action] || m.action) : 'skip';
-    if (bar) bar.style.width = (m.resp * 100).toFixed(1) + '%'; // responsibility λ
+    if (pr) {
+      // RP prior (accuracy + sample count) used to select.
+      if (m.rpAcc == null) { pr.className = 'cmprior na'; pr.textContent = '—'; }
+      else {
+        pr.className = 'cmprior' + (m.rpN > 0 ? '' : ' na');
+        pr.textContent = (m.rpAcc * 100).toFixed(0) + '%·' + m.rpN;
+        pr.title = 'RP prior for "' + (ctrl.sig || '?') + '": ' + (m.rpAcc * 100).toFixed(1) + '% over n=' + m.rpN;
+      }
+    }
+    if (bar) bar.style.width = (m.resp * 100).toFixed(1) + '%'; // final λ
     if (mt) {
-      // Forward-prediction error (running EMA in the tooltip).
+      // Forward-prediction error this tick (used to learn).
       if (!evaluated || m.fwdErr == null) { mt.className = 'cmmatch na'; mt.textContent = evaluated ? '?' : '–'; mt.title = ''; }
       else {
         mt.className = 'cmmatch ' + (m.fwdErr === 0 ? 'ok' : 'no');
         mt.textContent = 'e' + m.fwdErr;
-        mt.title = 'forward-error=' + m.fwdErr + ', running μ=' + (m.errEMA || 0).toFixed(2);
+        mt.title = 'forward-prediction error this tick = ' + m.fwdErr + ' (0 = exact match)';
       }
     }
   });
@@ -2196,7 +2336,8 @@ function updateCmpStats() {
     set('cmp-score-' + side, g.over ? g.finalScore : (g.coins * CONFIG.coinValue + Math.round(g.distance)));
     const note = document.getElementById('cmp-note-' + side);
     if (note) {
-      note.textContent = ctrl.note || (ctrl.decisions ? '' : 'waiting for first decision…');
+      const base = ctrl.note || (ctrl.decisions ? '' : 'waiting for first decision…');
+      note.textContent = (ctrl.sig ? '[' + ctrl.sig + '] ' : '') + base;
       note.className = 'cmp-note' + (ctrl.lastError ? ' err' : '');
     }
     if (ctrl.lastError) anyErr = ctrl.lastError;
@@ -2257,10 +2398,13 @@ function drawMiniGame(c, g, frozenLabel) {
 // Test hooks (used by the headless harness; no effect in the browser).
 if (typeof window !== 'undefined') {
   window.MOSAIC = {
-    mosaic, chooseAction, updateResponsibility, forwardError, predictNextLane,
+    mosaic, chooseAction, forwardError, predictNextLane,
     parseModuleReply, emptyForward, callModule, MCFG,
     chooseActionAmong, evalSequential, evalParallel, makeModuleSet, CMP,
     makeController, stepCmpGame, drawMiniGame,
+    // Responsibility predictor (RP)
+    rp, RPCFG, situationSignature, laneCategory, rpAccuracy, rpEntry,
+    rpSelect, rpLearn, rpLoad, rpSave,
   };
 }
 
