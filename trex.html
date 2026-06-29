@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>T-Rex Runner</title>
+<style>
+  :root { --ink:#535353; --bg:#ffffff; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:var(--bg); }
+  body {
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    font-family:"Courier New",monospace; color:var(--ink); user-select:none;
+  }
+  #wrap { position:relative; }
+  canvas { display:block; image-rendering:pixelated; }
+  #hint { margin-top:10px; font-size:12px; letter-spacing:1px; color:#9a9a9a; }
+  #overlay {
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    font-size:14px; letter-spacing:2px; color:var(--ink); pointer-events:none;
+  }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game" width="600" height="200"></canvas>
+    <div id="overlay">PRESS SPACE</div>
+  </div>
+  <div id="hint">SPACE / ↑ = JUMP</div>
+
+<script>
+const cv = document.getElementById('game');
+const cx = cv.getContext('2d');
+const overlay = document.getElementById('overlay');
+const W = cv.width, H = cv.height;
+const GROUND = 150;
+const DINO_H = 47;
+const GROUND_Y = GROUND - DINO_H;
+const INK = '#535353';
+
+const G = { state:'ready', speed:6, baseSpeed:6, score:0, hi:0, coins:0, t:0 };
+
+const dino = { x:50, y:GROUND_Y, w:44, h:DINO_H, vy:0, onGround:true };
+const GRAVITY = 0.7;
+const JUMP_V = -12.5;
+
+let obstacles = [];
+let coins = [];
+let spawnTimer = 0;
+let coinTimer = 0;
+
+function spawnObstacle() {
+  const r = Math.random();
+  if (r < 0.7) {
+    const big = Math.random() < 0.5;
+    const w = big ? 25 : 17;
+    const h = big ? 50 : 35;
+    obstacles.push({ type:'cactus', x:W, y:GROUND - h, w, h });
+  } else {
+    const heights = [GROUND - 70, GROUND - 45, GROUND - 25];
+    const y = heights[Math.floor(Math.random()*heights.length)];
+    obstacles.push({ type:'bird', x:W, y, w:34, h:24, flap:0 });
+  }
+}
+
+function spawnCoin() {
+  const y = GROUND - 30 - Math.random()*55;
+  coins.push({ x:W, y, r:9, spin:0 });
+}
+
+let groundOffset = 0;
+const bumps = [];
+for (let i=0;i<60;i++) bumps.push({ x:i*30 + Math.random()*20, len:Math.random()<0.3?6:0 });
+
+let clouds = [{x:300,y:50},{x:520,y:80}];
+
+const keys = { jump:false };
+function decide() {
+  if (keys.jump) return 'jump';
+  return 'run';
+}
+
+function applyAction(action) {
+  if (action === 'jump' && dino.onGround) {
+    dino.vy = JUMP_V;
+    dino.onGround = false;
+  }
+}
+
+function getWorldState() {
+  const next = obstacles.find(o => o.x + o.w > dino.x);
+  const nextCoin = coins.find(c => c.x + c.r > dino.x);
+  return {
+    dinoY: dino.y, dinoVy: dino.vy, onGround: dino.onGround,
+    speed: G.speed,
+    nextObstacle: next ? { dx:next.x-(dino.x+dino.w), type:next.type, y:next.y, w:next.w, h:next.h } : null,
+    nextCoin: nextCoin ? { dx:nextCoin.x-(dino.x+dino.w), y:nextCoin.y } : null,
+  };
+}
+window.getWorldState = getWorldState;
+
+function update() {
+  G.t++;
+  G.speed = G.baseSpeed + Math.floor(G.score / 100) * 0.4;
+
+  applyAction(decide(getWorldState()));
+
+  dino.vy += GRAVITY;
+  dino.y += dino.vy;
+  if (dino.y >= GROUND_Y) { dino.y = GROUND_Y; dino.vy = 0; dino.onGround = true; }
+
+  for (const o of obstacles) {
+    o.x -= G.speed;
+    if (o.type === 'bird') o.flap = (o.flap + 0.2) % 2;
+  }
+  obstacles = obstacles.filter(o => o.x + o.w > -10);
+
+  for (const c of coins) { c.x -= G.speed; c.spin = (c.spin + 0.15) % 2; }
+  coins = coins.filter(c => c.x + c.r > -10);
+
+  spawnTimer -= G.speed;
+  if (spawnTimer <= 0) { spawnObstacle(); spawnTimer = 350 + Math.random()*300; }
+
+  coinTimer -= G.speed;
+  if (coinTimer <= 0) { spawnCoin(); coinTimer = 250 + Math.random()*350; }
+
+  for (const o of obstacles) { if (hit(dino, o)) { gameOver(); return; } }
+
+  for (const c of coins) {
+    if (coinHit(dino, c)) { c.got = true; G.coins++; }
+  }
+  coins = coins.filter(c => !c.got);
+
+  groundOffset = (groundOffset + G.speed) % 30;
+  for (const cl of clouds) {
+    cl.x -= G.speed * 0.3;
+    if (cl.x < -60) { cl.x = W + Math.random()*100; cl.y = 40 + Math.random()*60; }
+  }
+
+  G.score += 0.15 * (G.speed / G.baseSpeed);
+}
+
+function hit(d, o) {
+  const pad = 6;
+  return d.x + pad < o.x + o.w && d.x + d.w - pad > o.x &&
+         d.y + pad < o.y + o.h && d.y + d.h - pad > o.y;
+}
+
+function coinHit(d, c) {
+  const cxp = c.x + c.r, cyp = c.y + c.r;
+  const nx = Math.max(d.x, Math.min(cxp, d.x + d.w));
+  const ny = Math.max(d.y, Math.min(cyp, d.y + d.h));
+  const dx = cxp - nx, dy = cyp - ny;
+  return dx*dx + dy*dy < c.r*c.r;
+}
+
+function draw() {
+  cx.clearRect(0,0,W,H);
+  cx.fillStyle = INK;
+
+  for (const cl of clouds) drawCloud(cl.x, cl.y);
+
+  cx.fillRect(0, GROUND, W, 2);
+  for (let i=0;i<bumps.length;i++) {
+    const b = bumps[i];
+    let x = (b.x - groundOffset) % (W+60);
+    if (x < 0) x += W+60;
+    if (b.len) cx.fillRect(x, GROUND + 3, b.len, 2);
+  }
+
+  drawDino();
+
+  for (const o of obstacles) {
+    if (o.type === 'cactus') drawCactus(o);
+    else drawBird(o);
+  }
+
+  for (const c of coins) drawCoin(c);
+
+  cx.font = 'bold 16px "Courier New",monospace';
+  cx.textAlign = 'right';
+  const s = String(Math.floor(G.score)).padStart(5,'0');
+  cx.fillText(s, W - 15, 30);
+  cx.textAlign = 'left';
+
+  // 동전 카운터 (왼쪽 위)
+  drawCoinIcon(20, 22);
+  cx.font = 'bold 16px "Courier New",monospace';
+  cx.fillText('x ' + G.coins, 38, 30);
+}
+
+function drawDino() {
+  const x = dino.x, y = dino.y;
+  cx.fillRect(x+18, y, 26, 22);
+  cx.clearRect(x+36, y+5, 4, 4);
+  cx.fillRect(x+10, y+18, 24, 18);
+  cx.fillRect(x, y+22, 14, 8);
+  cx.fillRect(x+12, y+34, 8, 13);
+  cx.fillRect(x+24, y+34, 8, 13);
+  cx.fillRect(x+34, y+22, 10, 5);
+}
+
+function drawCactus(o) {
+  cx.fillRect(o.x + o.w/2 - 4, o.y, 8, o.h);
+  cx.fillRect(o.x, o.y + o.h*0.3, 5, o.h*0.3);
+  cx.fillRect(o.x, o.y + o.h*0.3, o.w*0.4, 5);
+  cx.fillRect(o.x + o.w - 5, o.y + o.h*0.45, 5, o.h*0.3);
+  cx.fillRect(o.x + o.w*0.6, o.y + o.h*0.45, o.w*0.4, 5);
+}
+
+function drawBird(o) {
+  const up = o.flap < 1;
+  cx.fillRect(o.x+10, o.y+8, 18, 8);
+  cx.fillRect(o.x+26, o.y+6, 8, 5);
+  if (up) cx.fillRect(o.x, o.y, 14, 5);
+  else cx.fillRect(o.x, o.y+14, 14, 5);
+}
+
+function drawCoin(c) {
+  const cxp = c.x + c.r, cyp = c.y + c.r;
+  const wobble = Math.abs(Math.cos(c.spin * Math.PI));
+  cx.save();
+  cx.translate(cxp, cyp);
+  cx.fillStyle = INK;
+  cx.beginPath();
+  cx.ellipse(0, 0, Math.max(2, c.r*wobble), c.r, 0, 0, Math.PI*2);
+  cx.fill();
+  cx.fillStyle = '#fff';
+  cx.beginPath();
+  cx.ellipse(0, 0, Math.max(0.5, (c.r-3)*wobble), c.r-3, 0, 0, Math.PI*2);
+  cx.fill();
+  cx.restore();
+  cx.fillStyle = INK;
+}
+
+function drawCoinIcon(x, y) {
+  cx.fillStyle = INK;
+  cx.beginPath();
+  cx.arc(x, y, 8, 0, Math.PI*2);
+  cx.fill();
+  cx.fillStyle = '#fff';
+  cx.beginPath();
+  cx.arc(x, y, 5, 0, Math.PI*2);
+  cx.fill();
+  cx.fillStyle = INK;
+}
+
+function drawCloud(x,y) {
+  cx.save();
+  cx.strokeStyle = '#c9c9c9';
+  cx.lineWidth = 2;
+  cx.beginPath();
+  cx.arc(x, y, 9, Math.PI*0.5, Math.PI*1.5);
+  cx.arc(x+12, y-6, 11, Math.PI, Math.PI*2);
+  cx.arc(x+26, y, 9, Math.PI*1.5, Math.PI*0.5);
+  cx.lineTo(x, y+9);
+  cx.stroke();
+  cx.restore();
+}
+
+function loop() {
+  if (G.state === 'running') update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function start() {
+  G.state = 'running';
+  G.score = 0; G.speed = G.baseSpeed; G.coins = 0; G.t = 0;
+  obstacles = []; coins = []; spawnTimer = 200; coinTimer = 150;
+  dino.y = GROUND_Y; dino.vy = 0; dino.onGround = true;
+  overlay.textContent = '';
+}
+
+function gameOver() {
+  G.state = 'over';
+  if (G.score > G.hi) G.hi = G.score;
+  overlay.textContent = 'G A M E   O V E R   ·   SPACE';
+}
+
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') {
+    e.preventDefault();
+    if (G.state === 'ready' || G.state === 'over') start();
+    else keys.jump = true;
+  }
+});
+document.addEventListener('keyup', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') keys.jump = false;
+});
+cv.addEventListener('pointerdown', () => {
+  if (G.state === 'ready' || G.state === 'over') start();
+  else { keys.jump = true; setTimeout(()=>keys.jump=false, 100); }
+});
+
+loop();
+</script>
+</body>
+</html>
