@@ -31,6 +31,9 @@
   #dbg .bar i { display:block; height:100%; background:#535353; }
   #cfg { margin-top:8px; font-size:11px; color:#9a9a9a; }
   #cfg input[type=text],#cfg input[type=password]{ font-size:11px; padding:1px 3px; }
+  /* mock mode (checkbox unchecked): gray out the Cerebras fields, monochrome */
+  #cfg input:disabled { opacity:0.4; background:#f3f3f3; cursor:not-allowed; }
+  #cfg.mock #llm-fields { opacity:0.4; }
 </style>
 </head>
 <body>
@@ -40,11 +43,13 @@
     <div id="dbg"></div>
   </div>
   <div id="hint">MOSAIC AI is driving · SPACE = restart</div>
-  <div id="cfg">
+  <div id="cfg" class="mock">
     <label><input type="checkbox" id="llm-real"> use real Cerebras</label>
-    &nbsp; base <input type="text" id="llm-base" value="https://api.cerebras.ai/v1" size="20">
-    model <input type="text" id="llm-model" value="gemma-4-31b" size="9">
-    key <input type="password" id="llm-key" size="8">
+    <span id="llm-fields">
+      &nbsp; base <input type="text" id="llm-base" value="https://api.cerebras.ai/v1" size="20">
+      model <input type="text" id="llm-model" value="gemma-4-31b" size="9">
+      key <input type="password" id="llm-key" size="8">
+    </span>
   </div>
 
 <script>
@@ -160,8 +165,20 @@ function resetDecision() {
 }
 
 // --- (5) LLM seam: mock (rule-based) now, real Cerebras when toggled. ----
+// Single source of truth for the effective mode (used by BOTH the call path
+// and the overlay, so the displayed state is never misleading):
+//   unchecked            -> 'mock'
+//   checked + key present -> 'cerebras'
+//   checked + no key      -> 'mock-no-key' (falls back to mock)
+function llmKeyPresent() {
+  return (((document.getElementById('llm-key') || {}).value) || '').trim().length > 0;
+}
+function llmMode() {
+  if (!useRealLLM) return 'mock';
+  return llmKeyPresent() ? 'cerebras' : 'mock-no-key';
+}
 async function callCerebrasLLM(prompt, temperature, meta) {
-  if (!useRealLLM) return mockLLM(meta);          // meta = {state, action}
+  if (llmMode() !== 'cerebras') return mockLLM(meta);   // mock unless checked AND key present
   return realCerebrasLLM(prompt, temperature);
 }
 // Rule-based stand-in returning the SAME forced 3-way JSON the real model must.
@@ -460,7 +477,9 @@ function drawDebug() {
             (L.jumpProb != null ? ' (p=' + L.jumpProb.toFixed(2) + ')' : '') + '</div>';
     html += '<div class="row">result: ' + (L.result || '—') + '</div>';
   }
-  html += '<div class="row" style="color:#9a9a9a">LLM: ' + (useRealLLM ? 'Cerebras' : 'mock') + '</div>';
+  const _m = llmMode();
+  const _lbl = _m === 'cerebras' ? 'Cerebras' : _m === 'mock-no-key' ? 'mock (no key)' : 'mock';
+  html += '<div class="row" style="color:#9a9a9a">LLM: ' + _lbl + '</div>';
   el.innerHTML = html;
 }
 
@@ -502,8 +521,20 @@ document.addEventListener('keydown', e => {
 cv.addEventListener('pointerdown', () => {
   if (G.state === 'ready' || G.state === 'over') start();
 });
+// Mock vs real Cerebras: enable/gray the fields and keep useRealLLM in sync.
 const realChk = document.getElementById('llm-real');
-if (realChk) realChk.addEventListener('change', () => { useRealLLM = realChk.checked; });
+function syncLLMFields() {
+  const on = !!(realChk && realChk.checked);
+  useRealLLM = on;
+  ['llm-base', 'llm-model', 'llm-key'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !on;
+  });
+  const cfg = document.getElementById('cfg');
+  if (cfg) cfg.classList.toggle('mock', !on);   // dims the field group when mock
+}
+if (realChk) realChk.addEventListener('change', syncLLMFields);
+syncLLMFields();   // on load: default unchecked -> fields disabled, mock mode
 
 // Test hooks (used by the headless harness; no effect in the browser).
 if (typeof window !== 'undefined') {
