@@ -215,9 +215,17 @@ function spawnObstacle() {
   }
 }
 
+// Two coin kinds so reward no longer always favours JUMP:
+//   LOW (ground/standing height) -> only RUN (standing) collects; a jump flies
+//        OVER it and a duck's short hitbox is too low to reach it.
+//   HIGH (jump height)           -> only a JUMP reaches it (existing behaviour).
+const LOW_COIN_Y = GROUND - 50;            // center ~109: inside the standing body, above the crouch
 function spawnCoin() {
-  const y = GROUND - 30 - Math.random()*55;
-  coins.push({ x:W, y, r:9, spin:0 });
+  if (Math.random() < 0.45) {
+    coins.push({ x:W, y:LOW_COIN_Y, r:9, spin:0, low:true });               // run-through ground coin
+  } else {
+    coins.push({ x:W, y:GROUND - 90 + Math.random()*22, r:9, spin:0, low:false });  // high (jump grabs)
+  }
 }
 
 let groundOffset = 0;
@@ -254,6 +262,7 @@ function applyAction(action) {
 // Raw pixel access — stays INSIDE game code, never sent to the LLM.
 function nextObstacleRaw() { return obstacles.find(o => o.x + o.w > dino.x) || null; }
 function nextCoinRaw()     { return coins.find(c => c.x + c.r > dino.x) || null; }
+function nextLowCoinRaw()  { return coins.find(c => c.low && !c.got && c.x + c.r > dino.x) || null; }
 function obstacleDx(o)     { return o.x - (dino.x + dino.w); }
 function distBucket(dx) {
   if (dx < DIST_BUCKETS[0]) return 0;
@@ -270,11 +279,16 @@ function classifyFront(o) {
 // (1) DISCRETE state — the ONLY thing the LLM ever sees (no raw pixels).
 function getWorldState() {
   const o = nextObstacleRaw();
+  const db = o ? distBucket(obstacleDx(o)) : 3;
   const c = nextCoinRaw();
+  const coinAhead = !!(c && (c.x - (dino.x + dino.w)) < COIN_RANGE);
   return {
-    front: classifyFront(o),
-    dist_bucket: o ? distBucket(obstacleDx(o)) : 3,
-    coin_ahead: !!(c && (c.x - (dino.x + dino.w)) < COIN_RANGE),
+    // name an obstacle only when it is actually CLOSE; a far/empty path reads
+    // 'none', so a clear stretch with a low coin is a genuine run-the-coin call.
+    front: (o && db <= DECISION_BUCKET) ? classifyFront(o) : 'none',
+    dist_bucket: db,
+    coin_ahead: coinAhead,
+    coin_low: coinAhead && !!c.low,        // nearest coin ahead is a ground/run coin
     on_ground: dino.onGround,
   };
 }
@@ -293,10 +307,10 @@ const mosaic = { resp: {}, last: null };
 experts.forEach(e => { mosaic.resp[e.id] = 1 / experts.length; });   // uniform prior over N
 
 // (2) Decision/result gating — one decision per obstacle, scored once.
-const decision = { active:false, obs:null, state:null, action:null,
+const decision = { active:false, obs:null, kind:'obstacle', state:null, action:null,
                    ready:false, coinsAt:0, preds:null };
 function resetDecision() {
-  decision.active = false; decision.obs = null; decision.state = null;
+  decision.active = false; decision.obs = null; decision.kind = 'obstacle'; decision.state = null;
   decision.action = null; decision.ready = false; decision.preds = null;
 }
 
@@ -320,15 +334,20 @@ async function callCerebrasLLM(prompt, temperature, meta) {
 // Rule-based stand-in returning the SAME forced 3-way JSON the real model must.
 // Correct action per situation (matches the real hitbox geometry):
 //   cactus_* -> jump,  bird_low -> jump (jump over),  bird_high -> duck (under it),
-//   none -> any. Every other action that decision predicts 'bad'.
+//   none -> any. Reward: LOW coin -> RUN grabs it, HIGH coin -> JUMP grabs it.
 function mockLLM(meta) {
   const { state, action } = meta;
   let safety = 'bad';
   if (state.front === 'none')           safety = 'good';
   else if (state.front === 'bird_high') safety = (action === 'duck') ? 'good' : 'bad';  // ceiling: only duck clears
   else /* cactus_* or bird_low */       safety = (action === 'jump') ? 'good' : 'bad';
-  // Air coins need a jump — but jumping into the bird_high ceiling crashes, so no coin there.
-  const reward = (state.coin_ahead && action === 'jump' && state.front !== 'bird_high') ? 'good' : 'bad';
+  // reward depends on the coin's height: a ground coin is run THROUGH (standing),
+  // an air coin needs a JUMP (but jumping into the bird_high ceiling crashes -> no coin).
+  let reward = 'bad';
+  if (state.coin_ahead) {
+    if (state.coin_low)                              reward = (action === 'run')  ? 'good' : 'bad';
+    else if (action === 'jump' && state.front !== 'bird_high') reward = 'good';
+  }
   return JSON.stringify({ safety, reward });
 }
 async function realCerebrasLLM(prompt, temperature) {
@@ -386,22 +405,26 @@ function decide(preds, resp) {
   return { action: best ? best.action : 'run' };
 }
 
-// Decision point: fire ONE (async) decision for this obstacle.
-function startDecision(obs) {
-  decision.active = true; decision.obs = obs; decision.ready = false;
-  decision.state = getWorldState(); decision.coinsAt = G.coins;
+// Distance of the current decision TARGET (an obstacle or a low coin) ahead.
+function targetDx(d) {
+  return d.kind === 'coin' ? (d.obs.x - (dino.x + dino.w)) : obstacleDx(d.obs);
+}
+// Decision point: fire ONE (async) decision for this target (obstacle or low coin).
+function startDecision(target, kind) {
+  decision.active = true; decision.obs = target; decision.kind = kind || 'obstacle';
+  decision.ready = false; decision.state = getWorldState(); decision.coinsAt = G.coins;
   const st = decision.state;
   // Stage 1: forward prediction from EVERY expert, in parallel (loops over N).
   Promise.all(experts.map(e => predictExpert(st, e.action))).then(results => {
-    if (!decision.active || decision.obs !== obs) return;        // obstacle changed; drop
+    if (!decision.active || decision.obs !== target) return;     // target changed; drop
     const preds = {};
     experts.forEach((e, i) => { preds[e.id] = results[i]; });
     decision.preds = preds;
     const cmd = decide(preds, mosaic.resp);
     decision.action = cmd.action; decision.ready = true;
     // display snapshot (panel reads this; no effect on the math)
-    mosaic.last = { front: st.front, coin: st.coin_ahead, preds, resp: Object.assign({}, mosaic.resp),
-      command: cmd.action, actual: null };
+    mosaic.last = { front: st.front, coin: st.coin_ahead, coinLow: st.coin_low,
+      preds, resp: Object.assign({}, mosaic.resp), command: cmd.action, actual: null };
   });
 }
 
@@ -426,27 +449,42 @@ function scoreResult(crashed) {
   }
   if (z > 0) for (const e of experts) mosaic.resp[e.id] = w[e.id] / z;
   // display snapshot for the experts panel — plain outcome, NO error/softmax shown.
-  mosaic.last = { front: decision.state.front, coin: decision.state.coin_ahead, preds: decision.preds,
-    resp: Object.assign({}, mosaic.resp), command: decision.action,
+  mosaic.last = { front: decision.state.front, coin: decision.state.coin_ahead, coinLow: decision.state.coin_low,
+    preds: decision.preds, resp: Object.assign({}, mosaic.resp), command: decision.action,
     actual: { crashed: !!crashed, gotCoin: gotCoin } };
 }
 
 // Per-frame control seam (replaces the per-frame keyboard decide()).
 function controlStep() {
   const nextObs = nextObstacleRaw();
-  // RESULT POINT: the locked obstacle passed the dino -> score once, unlock.
+  // RESULT POINT: the locked target passed the dino (or was collected) -> score once.
   if (decision.active && decision.obs) {
     const o = decision.obs;
-    if (!obstacles.includes(o) || (o.x + o.w < dino.x)) { scoreResult(false); resetDecision(); }
+    const passed = decision.kind === 'coin'
+      ? (o.got || !coins.includes(o) || (o.x + o.r < dino.x))   // coin collected or gone past
+      : (!obstacles.includes(o) || (o.x + o.w < dino.x));        // obstacle gone past
+    if (passed) { scoreResult(false); resetDecision(); }
   }
-  // DECISION POINT: next obstacle first reaches the decision bucket (no re-deciding).
-  if (!decision.active && nextObs && distBucket(obstacleDx(nextObs)) <= DECISION_BUCKET) {
-    startDecision(nextObs);
+  // DECISION POINT (no re-deciding): an obstacle reaching the decision bucket
+  // takes priority; otherwise, on a CLEAR stretch (no close obstacle) a low coin
+  // in range triggers a "run the coin" decision where RUN is uniquely correct.
+  if (!decision.active) {
+    const obsDx = nextObs ? obstacleDx(nextObs) : Infinity;
+    if (nextObs && distBucket(obsDx) <= DECISION_BUCKET) {
+      startDecision(nextObs, 'obstacle');
+    } else {
+      const lowCoin = nextLowCoinRaw();
+      const coinDx = lowCoin ? (lowCoin.x - (dino.x + dino.w)) : Infinity;
+      if (lowCoin && coinDx <= COIN_RANGE && obsDx > DIST_BUCKETS[2]) {   // clear path + coin ahead
+        startDecision(lowCoin, 'coin');
+      }
+    }
   }
-  // EXECUTION: carry out the committed action (jump / duck / run) when the
-  // obstacle is close (well-timed). applyAction generalizes over actions.
+  // EXECUTION: carry out the committed action when the target is close. For a
+  // low-coin RUN decision applyAction('run') is a no-op — the standing dino just
+  // runs through the coin (collected by coinHit); a jump/duck would miss it.
   if (decision.active && decision.ready && dino.onGround &&
-      obstacleDx(decision.obs) <= Math.max(50, G.speed * 15)) {
+      targetDx(decision) <= Math.max(50, G.speed * 15)) {
     applyAction(decision.action);
   }
 }
@@ -504,10 +542,16 @@ function hit(d, o) {
          top + pad < o.y + o.h && top + h - pad > o.y;
 }
 
+// Collection uses the dino's CURRENT pose box (same geometry as hit()): standing
+// when running, the short low box when ducking, the raised box when airborne. So
+// a LOW coin is grabbed only by running — a jump flies over it, a duck is too low.
 function coinHit(d, c) {
+  const ducking = d.duckT > 0 && d.onGround;
+  const top = ducking ? (GROUND - DUCK_H) : d.y;
+  const h   = ducking ? DUCK_H : d.h;
   const cxp = c.x + c.r, cyp = c.y + c.r;
   const nx = Math.max(d.x, Math.min(cxp, d.x + d.w));
-  const ny = Math.max(d.y, Math.min(cyp, d.y + d.h));
+  const ny = Math.max(top, Math.min(cyp, top + h));
   const dx = cxp - nx, dy = cyp - ny;
   return dx*dx + dy*dy < c.r*c.r;
 }
@@ -724,12 +768,13 @@ function genCourse(seed) {
   const items = []; const coins = []; let x = 360;
   for (let i = 0; i < CMP.count; i++) {
     x += CMP.spacingMin + rng() * CMP.spacingVar;
-    // Balanced mix so all three actions fire: ~40% cactus (JUMP), ~30% bird_high
-    // (DUCK), ~30% bird_low (JUMP-over). Guarantees cacti + bird_high + bird_low.
+    // Balanced mix so ALL THREE actions fire: ~32% cactus (JUMP), ~25% bird_high
+    // (DUCK), ~22% bird_low (JUMP-over), ~21% low coin on a clear stretch (RUN).
     let o; const r1 = rng();
-    if (r1 < 0.40)      { const big = rng() < 0.5; o = { kind: 'cactus', h: big ? 50 : 35 }; }
-    else if (r1 < 0.70) { o = { kind: 'bird', y: GROUND - 70, high: true };  }   // bird_high -> DUCK
-    else                { o = { kind: 'bird', y: GROUND - 30, high: false }; }   // bird_low  -> JUMP
+    if (r1 < 0.32)      { const big = rng() < 0.5; o = { kind: 'cactus', h: big ? 50 : 35 }; }
+    else if (r1 < 0.57) { o = { kind: 'bird', y: GROUND - 70, high: true };  }   // bird_high -> DUCK
+    else if (r1 < 0.79) { o = { kind: 'bird', y: GROUND - 30, high: false }; }   // bird_low  -> JUMP
+    else                { o = { kind: 'lowcoin' };                           }   // ground coin -> RUN through it
     items.push({ dist: Math.round(x), o });
     // coin spawning, same idea as single play: a flag at jump height between obstacles
     if (rng() < 0.55) coins.push({ dist: Math.round(x + 35 + rng() * 45), y: GROUND - 30 - rng() * 55 });
@@ -742,15 +787,18 @@ function makeRunner(latencyMs, course) {
            tally: { jump: 0, run: 0, duck: 0 }, done: false, log: [],
            dinoY: MINI.ground - MINI.dinoH, dinoVy: 0, onGround: true };
 }
-// Discrete "front" of a course obstacle (same vocabulary the LLM sees).
+// Discrete "front" of a course item (same vocabulary the LLM sees). A low coin
+// sits on a clear stretch -> front 'none' (no obstacle).
 function frontOf(o) {
+  if (o.kind === 'lowcoin') return 'none';
   return classifyFront(o.kind === 'cactus' ? { type: 'cactus', h: o.h, y: 0 } : { type: 'bird', y: o.y });
 }
-// Comparison uses the SAME 3-action judgment as single play (self-contained, so
-// it doesn't depend on the single-game mock/decide): bird_high -> DUCK (crouch
-// under), cacti & bird_low -> JUMP (over). Both runners agree; only latency
-// differs. (RUN is never the correct answer here.)
+// Comparison uses the SAME action mapping as single play (self-contained):
+//   bird_high -> DUCK (crouch under), cacti & bird_low -> JUMP (over),
+//   low coin on a clear stretch -> RUN (stand and run through it).
+// Both runners agree; only latency differs.
 function cmpDecide(o) {
+  if (o.kind === 'lowcoin') return 'run';
   return frontOf(o) === 'bird_high' ? 'duck' : 'jump';
 }
 // Advance one runner by virtual elapsed dt (ms). World HOLDS while deciding.
@@ -785,12 +833,14 @@ function cmpStep(r, now, dt) {
       return;
     }
     if (r.lastCmd === 'duck' && ahead <= 40) r.duckT = 16;   // crouch as the bird arrives (DUCK)
-    if (r.pos >= it.dist) {                          // obstacle reached -> cleared (never dies)
+    if (r.pos >= it.dist) {                          // item reached -> cleared (never dies)
       if (r.lastCmd === 'jump' && r.onGround) { r.dinoVy = MINI.jump; r.onGround = false; }   // hop over
       const a = r.lastCmd || 'run';
       r.tally[a] = (r.tally[a] || 0) + 1;            // per-action usage tally
+      if (it.o.kind === 'lowcoin' && a === 'run') r.coinsGot++;   // ran through the ground coin
       // per-decision step log (front -> command -> result)
-      r.log.unshift('#' + (r.cleared + 1) + '  ' + (r.pendingFront || '?') + ' -> ' + a.toUpperCase() + '  pass');
+      const word = it.o.kind === 'lowcoin' ? '  grab' : '  pass';
+      r.log.unshift('#' + (r.cleared + 1) + '  ' + (r.pendingFront || '?') + ' -> ' + a.toUpperCase() + word);
       if (r.log.length > 5) r.log.pop();
       r.cleared++; r.idx++; r.lastCmd = null;
     }
@@ -801,6 +851,14 @@ function cmpProgress(r) { return Math.min(100, r.pos / r.course.len * 100); }
 
 function drawCmpObs(ctx, o, sx) {
   const g = MINI.ground;
+  if (o.kind === 'lowcoin') {
+    // ground coin at standing-body height — RUN through it (jump/duck miss)
+    const cy = g - 13;
+    ctx.beginPath(); ctx.arc(sx + 8, cy, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(sx + 8, cy, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = INK;
+    return;
+  }
   if (o.kind === 'cactus') {
     const h = o.h * 0.5;                              // scale to mini canvas
     ctx.fillRect(sx, g - h, 10, h);
@@ -1041,8 +1099,8 @@ if (typeof window !== 'undefined') {
     get obstacles() { return obstacles; }, get coins() { return coins; },
     getWorldState, classifyFront, distBucket, obstacleDx, buildPrompt, parsePrediction,
     predictExpert, decide, controlStep, update, start, gameOver,
-    scoreResult, actualOutcome, mockLLM, spawnObstacle, spawnCoin, hit, applyAction,
-    DUCK_H, GROUND, GROUND_Y, DINO_H, llmMode, llmKeyPresent,
+    scoreResult, actualOutcome, mockLLM, spawnObstacle, spawnCoin, hit, coinHit, applyAction,
+    DUCK_H, GROUND, GROUND_Y, DINO_H, LOW_COIN_Y, llmMode, llmKeyPresent,
     setReal: v => { useRealLLM = v; },
     // comparison mode
     CMP, cmp, mulberry32, genCourse, makeRunner, cmpStep, cmpDecide, cmpProgress, cmpStart, setMode, cmpFrame, frontOf,
