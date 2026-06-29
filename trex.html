@@ -19,14 +19,33 @@
     position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
     font-size:14px; letter-spacing:2px; color:var(--ink); pointer-events:none;
   }
+  #dbg {
+    position:absolute; top:6px; right:6px; width:184px; padding:6px 8px;
+    background:rgba(255,255,255,0.82); border:1px solid #e2e2e2; border-radius:4px;
+    font-size:10px; line-height:1.45; color:var(--ink); text-align:left;
+    pointer-events:none; letter-spacing:0;
+  }
+  #dbg b { color:#222; }
+  #dbg hr { border:0; border-top:1px solid #e2e2e2; margin:4px 0; }
+  #dbg .bar { height:5px; background:#e2e2e2; border-radius:3px; overflow:hidden; margin:2px 0; }
+  #dbg .bar i { display:block; height:100%; background:#535353; }
+  #cfg { margin-top:8px; font-size:11px; color:#9a9a9a; }
+  #cfg input[type=text],#cfg input[type=password]{ font-size:11px; padding:1px 3px; }
 </style>
 </head>
 <body>
   <div id="wrap">
     <canvas id="game" width="600" height="200"></canvas>
-    <div id="overlay">PRESS SPACE</div>
+    <div id="overlay"></div>
+    <div id="dbg"></div>
   </div>
-  <div id="hint">SPACE / ↑ = JUMP</div>
+  <div id="hint">MOSAIC AI is driving · SPACE = restart</div>
+  <div id="cfg">
+    <label><input type="checkbox" id="llm-real"> use real Cerebras</label>
+    &nbsp; base <input type="text" id="llm-base" value="https://api.cerebras.ai/v1" size="20">
+    model <input type="text" id="llm-model" value="gemma-4-31b" size="9">
+    key <input type="password" id="llm-key" size="8">
+  </div>
 
 <script>
 const cv = document.getElementById('game');
@@ -74,12 +93,21 @@ for (let i=0;i<60;i++) bumps.push({ x:i*30 + Math.random()*20, len:Math.random()
 
 let clouds = [{x:300,y:50},{x:520,y:80}];
 
-const keys = { jump:false };
-function decide() {
-  if (keys.jump) return 'jump';
-  return 'run';
-}
+/* =======================================================================
+   MOSAIC (Wolpert-Kawato) multi-expert control — replaces keyboard input.
+   Game physics/rendering (update body, draw, hit, coinHit, spawn) are NOT
+   touched; only how the jump/run action is decided.
+   ======================================================================= */
 
+// --- tunables ---
+const DIST_BUCKETS = [60, 140, 240];      // dx<60->0, <140->1, <240->2, else 3
+const DECISION_BUCKET = 2;                 // decide when the obstacle first reaches this bucket
+const COIN_RANGE = 240;                    // a coin within this dx counts as "ahead"
+const VAL = { bad: 0, ok: 5, good: 10 };   // forced 3-way LLM choice -> number (no free numbers)
+const BETA = 0.04;                         // softmax sharpness for the responsibility update
+let useRealLLM = false;                    // false = rule-based mock; true = Cerebras API
+
+// Execution only (sets the jump velocity); not a decision.
 function applyAction(action) {
   if (action === 'jump' && dino.onGround) {
     dino.vy = JUMP_V;
@@ -87,23 +115,176 @@ function applyAction(action) {
   }
 }
 
+// Raw pixel access — stays INSIDE game code, never sent to the LLM.
+function nextObstacleRaw() { return obstacles.find(o => o.x + o.w > dino.x) || null; }
+function nextCoinRaw()     { return coins.find(c => c.x + c.r > dino.x) || null; }
+function obstacleDx(o)     { return o.x - (dino.x + dino.w); }
+function distBucket(dx) {
+  if (dx < DIST_BUCKETS[0]) return 0;
+  if (dx < DIST_BUCKETS[1]) return 1;
+  if (dx < DIST_BUCKETS[2]) return 2;
+  return 3;
+}
+function classifyFront(o) {
+  if (!o) return 'none';
+  if (o.type === 'cactus') return o.h >= 45 ? 'cactus_big' : 'cactus_small';
+  return o.y <= GROUND - 50 ? 'bird_high' : 'bird_low';   // high = run under; low = must jump
+}
+
+// (1) DISCRETE state — the ONLY thing the LLM ever sees (no raw pixels).
 function getWorldState() {
-  const next = obstacles.find(o => o.x + o.w > dino.x);
-  const nextCoin = coins.find(c => c.x + c.r > dino.x);
+  const o = nextObstacleRaw();
+  const c = nextCoinRaw();
   return {
-    dinoY: dino.y, dinoVy: dino.vy, onGround: dino.onGround,
-    speed: G.speed,
-    nextObstacle: next ? { dx:next.x-(dino.x+dino.w), type:next.type, y:next.y, w:next.w, h:next.h } : null,
-    nextCoin: nextCoin ? { dx:nextCoin.x-(dino.x+dino.w), y:nextCoin.y } : null,
+    front: classifyFront(o),
+    dist_bucket: o ? distBucket(obstacleDx(o)) : 3,
+    coin_ahead: !!(c && (c.x - (dino.x + dino.w)) < COIN_RANGE),
+    on_ground: dino.onGround,
   };
 }
 window.getWorldState = getWorldState;
+
+// --- (3) MOSAIC core: two forward+inverse experts -----------------------
+// jump expert {forward:"if I jump, outcome?", inverse:"jump"}
+// run  expert {forward:"if I run,  outcome?", inverse:"run"}
+const experts = [{ id: 'jump', action: 'jump' }, { id: 'run', action: 'run' }];
+const mosaic = { respJump: 0.5, respRun: 0.5, last: null };
+
+// (2) Decision/result gating — one decision per obstacle, scored once.
+const decision = { active:false, obs:null, state:null, action:null,
+                   ready:false, coinsAt:0, predJump:null, predRun:null };
+function resetDecision() {
+  decision.active = false; decision.obs = null; decision.state = null;
+  decision.action = null; decision.ready = false;
+  decision.predJump = null; decision.predRun = null;
+}
+
+// --- (5) LLM seam: mock (rule-based) now, real Cerebras when toggled. ----
+async function callCerebrasLLM(prompt, temperature, meta) {
+  if (!useRealLLM) return mockLLM(meta);          // meta = {state, action}
+  return realCerebrasLLM(prompt, temperature);
+}
+// Rule-based stand-in returning the SAME forced 3-way JSON the real model must.
+function mockLLM(meta) {
+  const { state, action } = meta;
+  const groundHazard = (state.front === 'cactus_big' || state.front === 'cactus_small' || state.front === 'bird_low');
+  let safety;
+  if (state.front === 'none')      safety = 'good';
+  else if (action === 'jump')      safety = (state.front === 'bird_high') ? 'bad' : 'good'; // jump clears ground, hits high bird
+  else /* run */                   safety = groundHazard ? 'bad' : 'good';                 // run hits cacti / low bird
+  const reward = (state.coin_ahead && action === 'jump') ? 'good' : 'bad';                 // air coins need a jump
+  return JSON.stringify({ safety, reward });
+}
+async function realCerebrasLLM(prompt, temperature) {
+  const base  = (document.getElementById('llm-base')  || {}).value || 'https://api.cerebras.ai/v1';
+  const key   = (document.getElementById('llm-key')   || {}).value || '';
+  const model = (document.getElementById('llm-model') || {}).value || 'gemma-4-31b';
+  const res = await fetch(base.trim().replace(/\/+$/, '') + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key.trim() },
+    body: JSON.stringify({ model: model.trim(), temperature, max_tokens: 40,
+      response_format: { type: 'json_object' },
+      messages: [{ role: 'user', content: prompt }] }),
+  });
+  const data = await res.json();
+  return (data.choices && data.choices[0] && data.choices[0].message.content) || '{}';
+}
+function buildPrompt(state, action) {
+  return 'You are the FORWARD model of the "' + action + '" expert in a T-Rex runner.\n' +
+    'Discrete state: front=' + state.front + ', dist_bucket=' + state.dist_bucket +
+    ' (0=right ahead, 3=far), coin_ahead=' + state.coin_ahead + ', on_ground=' + state.on_ground + '.\n' +
+    'If the dino does "' + action + '" now, predict the outcome. Reply ONLY compact JSON, no prose:\n' +
+    '{"safety":"bad|ok|good","reward":"bad|ok|good"}\n' +
+    'safety: good = avoids crashing, bad = crashes. reward: good = eats a coin, bad = no coin.';
+}
+function parsePrediction(text) {
+  let safety = 'ok', reward = 'bad';
+  try {
+    const m = String(text).match(/\{[\s\S]*\}/);
+    const o = JSON.parse(m ? m[0] : text);
+    if (['bad','ok','good'].includes(o.safety)) safety = o.safety;
+    if (['bad','ok','good'].includes(o.reward)) reward = o.reward;
+  } catch (e) {}
+  return { safety: VAL[safety], reward: VAL[reward], sWord: safety, rWord: reward };
+}
+// Stage 1: a single expert's forward prediction for (state + its own action).
+async function predictExpert(state, action) {
+  return parsePrediction(await callCerebrasLLM(buildPrompt(state, action), 0, { state, action }));
+}
+
+// Stage 4: responsibility-weighted command from the two forward predictions.
+// Each expert "votes" for its action with its predicted value, weighted by trust.
+function decide(predJump, predRun) {
+  const vJ = predJump.safety + predJump.reward;   // predicted value of jumping
+  const vR = predRun.safety  + predRun.reward;    // predicted value of running
+  const sJ = mosaic.respJump * vJ, sR = mosaic.respRun * vR;
+  const denom = sJ + sR;
+  const jumpProb = denom > 0 ? sJ / denom : 0.5;
+  return { action: jumpProb >= 0.5 ? 'jump' : 'run', jumpProb };
+}
+
+// Decision point: fire ONE (async) decision for this obstacle.
+function startDecision(obs) {
+  decision.active = true; decision.obs = obs; decision.ready = false;
+  decision.state = getWorldState(); decision.coinsAt = G.coins;
+  const st = decision.state;
+  Promise.all([predictExpert(st, 'jump'), predictExpert(st, 'run')]).then(([pj, pr]) => {
+    if (!decision.active || decision.obs !== obs) return;        // obstacle changed; drop
+    decision.predJump = pj; decision.predRun = pr;
+    const cmd = decide(pj, pr);
+    decision.action = cmd.action; decision.ready = true;
+    mosaic.last = { front: st.front, state: st, predJump: pj, predRun: pr,
+      respJump: mosaic.respJump, respRun: mosaic.respRun, jumpProb: cmd.jumpProb,
+      command: cmd.action, result: mosaic.last ? mosaic.last.result : '—' };
+  });
+}
+
+// (4) Deterministic actual outcome, computed by CODE at the result point.
+function actualOutcome(action, front, gotCoin, crashed) {
+  return { safety: crashed ? 0 : 10, reward: gotCoin ? 10 : 0 };
+}
+function sq(x) { return x * x; }
+// Stages 2-3: squared error of each forward prediction vs actual -> softmax -> responsibilities.
+function scoreResult(crashed) {
+  if (!decision.ready || !decision.predJump || !decision.predRun) return;
+  const gotCoin = G.coins > decision.coinsAt;
+  const actual = actualOutcome(decision.action, decision.state.front, gotCoin, crashed);
+  const errJ = sq(decision.predJump.safety - actual.safety) + sq(decision.predJump.reward - actual.reward);
+  const errR = sq(decision.predRun.safety  - actual.safety) + sq(decision.predRun.reward  - actual.reward);
+  const wJ = Math.exp(-BETA * errJ), wR = Math.exp(-BETA * errR);
+  const z = (wJ + wR) || 1;
+  mosaic.respJump = wJ / z; mosaic.respRun = wR / z;
+  mosaic.last = { front: decision.state.front, state: decision.state,
+    predJump: decision.predJump, predRun: decision.predRun,
+    respJump: mosaic.respJump, respRun: mosaic.respRun, jumpProb: null,
+    command: decision.action,
+    result: (crashed ? 'CRASH' : 'PASS') + (gotCoin ? ' +coin' : '') + ' (eJ=' + errJ + ' eR=' + errR + ')' };
+}
+
+// Per-frame control seam (replaces the per-frame keyboard decide()).
+function controlStep() {
+  const nextObs = nextObstacleRaw();
+  // RESULT POINT: the locked obstacle passed the dino -> score once, unlock.
+  if (decision.active && decision.obs) {
+    const o = decision.obs;
+    if (!obstacles.includes(o) || (o.x + o.w < dino.x)) { scoreResult(false); resetDecision(); }
+  }
+  // DECISION POINT: next obstacle first reaches the decision bucket (no re-deciding).
+  if (!decision.active && nextObs && distBucket(obstacleDx(nextObs)) <= DECISION_BUCKET) {
+    startDecision(nextObs);
+  }
+  // EXECUTION: a committed JUMP fires when the obstacle is close (well-timed).
+  if (decision.active && decision.ready && decision.action === 'jump' &&
+      dino.onGround && obstacleDx(decision.obs) <= Math.max(50, G.speed * 15)) {
+    applyAction('jump');
+  }
+}
 
 function update() {
   G.t++;
   G.speed = G.baseSpeed + Math.floor(G.score / 100) * 0.4;
 
-  applyAction(decide(getWorldState()));
+  controlStep();   // MOSAIC: decision gating + execution (was: applyAction(decide(getWorldState())))
 
   dino.vy += GRAVITY;
   dino.y += dino.vy;
@@ -258,9 +439,38 @@ function drawCloud(x,y) {
   cx.restore();
 }
 
+// --- (6) On-screen debug overlay (top-right): state, predictions, responsibilities, command.
+function drawDebug() {
+  const el = document.getElementById('dbg');
+  if (!el) return;
+  const live = getWorldState();
+  const L = mosaic.last;
+  const pct = x => (x * 100).toFixed(0) + '%';
+  const f = p => p ? (p.sWord + '/' + p.rWord) : '?';   // safety / reward words
+  let html = '<b>MOSAIC control</b>';
+  html += '<div class="row">front: <b>' + live.front + '</b></div>';
+  html += '<div class="row">bucket ' + live.dist_bucket + ' · coin ' + (live.coin_ahead ? 'Y' : 'N') + '</div>';
+  html += '<div class="bars">resp jump <b>' + pct(mosaic.respJump) + '</b> · run <b>' + pct(mosaic.respRun) + '</b></div>';
+  html += '<div class="bar"><i style="width:' + pct(mosaic.respJump) + '"></i></div>';
+  if (L) {
+    html += '<hr>last decision @ <b>' + L.front + '</b>';
+    html += '<div class="row">jump exp (s/r): ' + f(L.predJump) + '</div>';
+    html += '<div class="row">run  exp (s/r): ' + f(L.predRun) + '</div>';
+    html += '<div class="row">command: <b>' + (L.command || '?').toUpperCase() + '</b>' +
+            (L.jumpProb != null ? ' (p=' + L.jumpProb.toFixed(2) + ')' : '') + '</div>';
+    html += '<div class="row">result: ' + (L.result || '—') + '</div>';
+  }
+  html += '<div class="row" style="color:#9a9a9a">LLM: ' + (useRealLLM ? 'Cerebras' : 'mock') + '</div>';
+  el.innerHTML = html;
+}
+
 function loop() {
+  G.loopT = (G.loopT || 0) + 1;
   if (G.state === 'running') update();
   draw();
+  drawDebug();
+  if (G.state === 'ready') start();                                            // AI auto-starts
+  else if (G.state === 'over' && G.loopT - (G.overAtLoop || 0) > 45) start();   // auto-restart to keep learning
   requestAnimationFrame(loop);
 }
 
@@ -269,29 +479,43 @@ function start() {
   G.score = 0; G.speed = G.baseSpeed; G.coins = 0; G.t = 0;
   obstacles = []; coins = []; spawnTimer = 200; coinTimer = 150;
   dino.y = GROUND_Y; dino.vy = 0; dino.onGround = true;
+  resetDecision();                 // responsibilities (mosaic.*) persist across runs
   overlay.textContent = '';
 }
 
 function gameOver() {
+  if (decision.active && decision.ready) scoreResult(true);   // result point on collision
+  resetDecision();
   G.state = 'over';
+  G.overAtLoop = G.loopT;
   if (G.score > G.hi) G.hi = G.score;
-  overlay.textContent = 'G A M E   O V E R   ·   SPACE';
+  overlay.textContent = '';        // MOSAIC auto-restarts
 }
 
+// MOSAIC drives jumping; keys/clicks only (re)start. No per-frame keyboard control.
 document.addEventListener('keydown', e => {
   if (e.code === 'Space' || e.code === 'ArrowUp') {
     e.preventDefault();
     if (G.state === 'ready' || G.state === 'over') start();
-    else keys.jump = true;
   }
-});
-document.addEventListener('keyup', e => {
-  if (e.code === 'Space' || e.code === 'ArrowUp') keys.jump = false;
 });
 cv.addEventListener('pointerdown', () => {
   if (G.state === 'ready' || G.state === 'over') start();
-  else { keys.jump = true; setTimeout(()=>keys.jump=false, 100); }
 });
+const realChk = document.getElementById('llm-real');
+if (realChk) realChk.addEventListener('change', () => { useRealLLM = realChk.checked; });
+
+// Test hooks (used by the headless harness; no effect in the browser).
+if (typeof window !== 'undefined') {
+  window.TREX = {
+    G, dino, mosaic, decision, experts,
+    get obstacles() { return obstacles; }, get coins() { return coins; },
+    getWorldState, classifyFront, distBucket, obstacleDx, buildPrompt, parsePrediction,
+    predictExpert, decide, controlStep, update, start, gameOver,
+    scoreResult, actualOutcome, mockLLM, spawnObstacle, spawnCoin,
+    setReal: v => { useRealLLM = v; },
+  };
+}
 
 loop();
 </script>
