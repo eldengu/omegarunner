@@ -1539,10 +1539,17 @@ window.addEventListener('keydown', (ev) => {
    This NEVER touches game logic. It only writes to `pendingAction` (the same
    buffer the keyboard uses) — exactly through the existing agentStep seam.
    ========================================================================= */
+// Tunable: LLM sampling temperature for the experts' inverse + forward calls.
+// HIGH on purpose — this is the symmetry breaker. At low temperature the three
+// experts collapse to the same (often factual) answer for the same state and can
+// never differentiate; ~0.8–1.0 makes their proposals/predictions meaningfully
+// different so reinforcement has something to amplify. Lower it toward ~0.4 only
+// if you want tighter, less exploratory predictions (at the cost of divergence).
+const EXPERT_TEMPERATURE = 0.9;
 const MCFG = {
   settleTicks: 14,     // game ticks to wait before scoring a prediction
   fwdMaxErr: 4,        // max forward error (coin+freeze+lane+posture); a failed call = this
-  temperature: 0.4,
+  temperature: EXPERT_TEMPERATURE,
   maxTokens: 220,      // room for the per-action forward predictions
   minDecisionMs: 50,   // small breather between decisions
   autoRestartMs: 2500, // when AI is on, auto-restart after the timer ends
@@ -1596,6 +1603,7 @@ const SELFCFG = {
   minSamples: 2,    // ignore thinly-sampled signatures in the self summary
   topK: 4,          // situations surfaced in the self-memory text
   claimMinAcc: 0.6, // accuracy above which a situation counts as "claimed"
+  exploreUntilN: 12,// total samples below which the per-expert exploration tilt is active
 };
 // This expert's signatures with posterior-mean accuracy (its self memory).
 function expertRecord(id) {
@@ -1607,6 +1615,11 @@ function expertRecord(id) {
       acc: (e.hit + RPCFG.priorA) / (e.n + RPCFG.priorA + RPCFG.priorB) });
   }
   return out.sort((a, b) => b.acc - a.acc || b.n - a.n);
+}
+// Total samples this expert has accumulated (across all signatures).
+function expertTotalSamples(id) {
+  let n = 0; for (const sig in rp.table) { const e = rp.table[sig] && rp.table[sig][id]; if (e) n += e.n; }
+  return n;
 }
 // Short self-memory text injected into the expert's prompt (conditions it).
 function expertSelfSummary(id) {
@@ -1692,12 +1705,22 @@ const EXPERT_CORE =
   "track record of which situations you predict well (given below). SPECIALISE: in a situation you " +
   "have predicted accurately before, answer confidently and consistently the way that has worked; " +
   "in a new or poorly-predicted situation, commit to your OWN distinct best guess rather than a " +
-  "bland generic one, so you can claim a niche the other experts have not taken. Do not converge.";
+  "bland generic one, so you can claim a niche the other experts have not taken.\n" +
+  "BE BOLD AND DIFFERENT: do NOT default to the safe consensus (e.g. 'stay, nothing happens'). " +
+  "Take a clear stance — commit to a specific action and make decisive coin/freeze predictions. " +
+  "It is better to be distinctively wrong and learn than to blend in with the other experts.";
 
+// Per-expert EXPLORATION TILT: a small, DIFFERENT initial lean used ONLY while an
+// expert is still inexperienced (few samples), to break the start-of-life
+// symmetry. It is NOT a fixed role — it fades once the expert has a track record,
+// and its emergent specialization can move anywhere from there.
 const MODULE_DEFS = [
-  { id: 'e1', name: 'Expert 1', seed: 1009 },
-  { id: 'e2', name: 'Expert 2', seed: 2017 },
-  { id: 'e3', name: 'Expert 3', seed: 3023 },
+  { id: 'e1', name: 'Expert 1', seed: 1009,
+    tilt: "Exploration lean while still learning: when unsure, gamble on COINS — assume a flag is grabbable and switch toward it." },
+  { id: 'e2', name: 'Expert 2', seed: 2017,
+    tilt: "Exploration lean while still learning: when unsure, play it SAFE — assume hazards bite and pick the clearest lane / stay." },
+  { id: 'e3', name: 'Expert 3', seed: 3023,
+    tilt: "Exploration lean while still learning: when unsure, be AGGRESSIVE — favour jumping and decisive lane changes." },
 ];
 
 const mosaic = {
@@ -1789,9 +1812,12 @@ function parseModuleReply(text) {
 }
 
 async function callModule(m, conn, stateText, onErr) {
-  // Same neutral core for every expert + ITS OWN evolving self memory — that is
-  // the only thing that differs between experts (no hardcoded persona).
-  const system = EXPERT_CORE + '\n[' + m.name + '] ' + expertSelfSummary(m.id);
+  // Same neutral core for every expert + ITS OWN evolving self memory. While the
+  // expert is still inexperienced, also append its distinct EXPLORATION TILT to
+  // break the start-of-life symmetry; the tilt fades once it has a track record,
+  // so it is a kick-start, not a fixed role.
+  const tilt = (m.tilt && expertTotalSamples(m.id) < SELFCFG.exploreUntilN) ? ('\n' + m.tilt) : '';
+  const system = EXPERT_CORE + '\n[' + m.name + '] ' + expertSelfSummary(m.id) + tilt;
   const user = 'Current state:\n' + stateText + '\n\nYour action + prediction as JSON:';
   const t0 = nowMs();
   try {
@@ -2466,8 +2492,9 @@ if (typeof window !== 'undefined') {
     // Responsibility predictor (RP)
     rp, RPCFG, situationSignature, laneCategory, rpAccuracy, rpEntry,
     rpSelect, rpLearn, rpLoad, rpSave,
-    // Emergent specialization (self memory)
-    EXPERT_CORE, SELFCFG, MODULE_DEFS, expertRecord, expertSelfSummary, expertSpecialtyLabel,
+    // Emergent specialization (self memory + symmetry breaking)
+    EXPERT_CORE, EXPERT_TEMPERATURE, SELFCFG, MODULE_DEFS,
+    expertRecord, expertTotalSamples, expertSelfSummary, expertSpecialtyLabel,
   };
 }
 
