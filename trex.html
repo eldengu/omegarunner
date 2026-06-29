@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>T-Rex Runner</title>
+<style>
+  :root { --ink:#535353; --bg:#ffffff; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:var(--bg); }
+  body {
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    font-family:"Courier New",monospace; color:var(--ink); user-select:none;
+  }
+  #wrap { display:flex; align-items:flex-start; justify-content:center; gap:14px; }
+  #leftcol { display:flex; flex-direction:column; align-items:flex-start; width:600px; } /* canvas + hint + config, under the playfield */
+  #play { position:relative; }
+  canvas { display:block; image-rendering:pixelated; }
+  #hint { margin-top:11px; font-size:12px; letter-spacing:1px; color:#7d7d7d; text-align:left; }
+  #overlay {
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    font-size:14px; letter-spacing:2px; color:var(--ink); pointer-events:none;
+  }
+  /* EXPERTS panel — tidy static side column to the RIGHT of the canvas (no overlap) */
+  #dbg {
+    flex:none; align-self:flex-start; width:226px; padding:9px 11px;
+    background:var(--bg); border:1px solid var(--ink); border-radius:4px;
+    font-family:"Courier New",monospace; font-size:10.5px; line-height:1.5; color:var(--ink);
+    text-align:left; pointer-events:none; letter-spacing:0;
+  }
+  #dbg b { color:#222; }
+  #dbg .dim { color:#9a9a9a; }
+  #dbg .title { font-weight:700; letter-spacing:2px; margin-bottom:6px; }
+  #dbg hr { border:0; border-top:1px solid #d6d6d6; margin:7px 0; }
+  #dbg .sit, #dbg .res, #dbg .legend, #dbg .next, #dbg .llm { margin:1px 0; white-space:nowrap; }
+  #dbg .sit .k { color:#9a9a9a; }
+  #dbg .erow { display:grid; grid-template-columns:1fr auto 14px; align-items:center; gap:6px; margin-top:4px; white-space:nowrap; padding:1px 2px; }
+  #dbg .erow.chosen { background:#f1f1f1; }   /* subtle monochrome emphasis on the chosen command */
+  #dbg .erow .nm { font-weight:700; }
+  #dbg .erow .mk { display:inline-block; width:12px; }
+  #dbg .erow .tp { text-align:right; font-variant-numeric:tabular-nums; }
+  #dbg .erow .vg { text-align:center; font-weight:700; }
+  #dbg .pr { margin:1px 0 0 12px; color:#6b6b6b; white-space:nowrap; }
+  #dbg .bar { height:6px; background:var(--bg); border:1px solid var(--ink); overflow:hidden; margin:3px 0 2px 12px; width:calc(100% - 12px); }
+  #dbg .bar i { display:block; height:100%; background:var(--ink); }
+  #cfg { margin-top:9px; width:100%; font-size:11px; color:#7d7d7d;
+    display:flex; flex-wrap:wrap; justify-content:flex-start; align-items:center; gap:6px 14px; }
+  #cfg .fld { display:inline-flex; align-items:center; gap:5px; }
+  #cfg label { display:inline-flex; align-items:center; gap:5px; }
+  #cfg input[type=text],#cfg input[type=password]{ font-size:11px; padding:2px 4px; border:1px solid #bdbdbd; background:var(--bg); color:var(--ink); }
+
+  /* mode toggle + comparison mode — strictly black & white */
+  #modebar { margin-bottom:12px; }
+  #modebar button, #cmp button {
+    font-family:"Courier New",monospace; font-size:12px; color:var(--ink);
+    background:var(--bg); border:1px solid var(--ink); padding:3px 12px; cursor:pointer; letter-spacing:1px;
+  }
+  #modebar button.on { background:var(--ink); color:var(--bg); }
+  .hidden { display:none !important; }
+  #cmp { display:flex; flex-direction:column; align-items:center; gap:8px; font-family:"Courier New",monospace; }
+  #cmp-clock { font-size:15px; letter-spacing:2px; }
+  #cmp-pace { font-size:12px; letter-spacing:1px; display:flex; align-items:center; gap:5px; margin-bottom:2px; }
+  #cmp-pace button { padding:2px 10px; }
+  #cmp-pace button.on { background:var(--ink); color:var(--bg); }
+  .cmp-row { display:flex; flex-direction:column; gap:18px; }
+  .cmp-lane { width:560px; }                               /* both lanes = canvas width, balanced */
+  .cmp-head { font-size:12px; letter-spacing:1px; margin-bottom:5px; }
+  #cmp canvas { border:1px solid #d6d6d6; border-radius:3px; display:block; image-rendering:pixelated; }
+  .cmp-meta { margin-top:7px; font-size:11.5px; letter-spacing:0.3px;
+    display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .cmp-meta .pct { width:34px; text-align:right; font-variant-numeric:tabular-nums; }
+  .cmp-meta .stat { white-space:nowrap; }
+  .cmp-meta .stat b, .cmp-meta .pct { color:#222; }
+  .pbar { display:inline-block; width:250px; height:11px; border:1px solid var(--ink); vertical-align:middle; }
+  .pbar i { display:block; height:100%; background:var(--ink); width:0%; }
+  .cmp-log { margin-top:6px; font-size:10px; line-height:1.55; min-height:80px; color:#6b6b6b; text-align:left; width:560px; white-space:nowrap; }
+  #cmp-verdict { max-width:600px; font-size:12px; line-height:1.6; min-height:36px; text-align:center; margin-top:6px; }
+
+  /* real-Cerebras key modal — strictly monochrome */
+  #keymodal { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(255,255,255,0.72); z-index:50; }
+  #keymodal.hidden { display:none; }
+  #keymodal .box { background:var(--bg); border:2px solid var(--ink); border-radius:4px;
+    padding:18px 20px; width:330px; text-align:left; font-family:"Courier New",monospace; color:var(--ink); }
+  #keymodal h3 { font-size:13px; font-weight:700; letter-spacing:1px; margin-bottom:10px; }
+  #keymodal p { font-size:11px; line-height:1.5; color:#6b6b6b; margin-bottom:10px; }
+  #keymodal input { width:100%; box-sizing:border-box; font-family:"Courier New",monospace; font-size:12px;
+    padding:5px 7px; border:1px solid var(--ink); background:var(--bg); color:var(--ink); margin-bottom:14px; }
+  #keymodal .btns { text-align:right; }
+  #keymodal button { font-family:"Courier New",monospace; font-size:12px; letter-spacing:1px; color:var(--ink);
+    background:var(--bg); border:1px solid var(--ink); padding:3px 14px; cursor:pointer; margin-left:6px; }
+  #keymodal button.primary { background:var(--ink); color:var(--bg); }
+</style>
+</head>
+<body>
+  <div id="modebar">
+    <button id="mode-single" class="on" type="button">Single play</button>
+    <button id="mode-compare" type="button">Comparison</button>
+  </div>
+  <div id="wrap">
+    <div id="leftcol">
+      <div id="play">
+        <canvas id="game" width="600" height="200"></canvas>
+        <div id="overlay"></div>
+      </div>
+      <div id="hint">MOSAIC AI is NOT driving (mock) · SPACE = restart</div>
+      <div id="cfg">
+        <label><input type="checkbox" id="llm-real"> use real Cerebras</label>
+        <span class="fld">base <input type="text" id="llm-base" value="https://api.cerebras.ai/v1" size="20"></span>
+        <span class="fld">model <input type="text" id="llm-model" value="gemma-4-31b" size="9"></span>
+        <span class="fld">key <input type="password" id="llm-key" size="8"></span>
+      </div>
+    </div>
+    <div id="dbg"></div>
+  </div>
+
+  <!-- Key popup shown when "use real Cerebras" is checked -->
+  <div id="keymodal" class="hidden">
+    <div class="box">
+      <h3>USE REAL CEREBRAS</h3>
+      <p>Enter your Cerebras API key. OK starts a fresh run driven by the real model;
+         Cancel (or an empty key) stays on the mock.</p>
+      <input type="password" id="keymodal-input" placeholder="sk-..." autocomplete="off" spellcheck="false">
+      <div class="btns">
+        <button type="button" id="keymodal-cancel">CANCEL</button>
+        <button type="button" id="keymodal-ok" class="primary">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Comparison mode: same seeded course, two latencies. Throughput, not survival. -->
+  <div id="cmp" class="hidden">
+    <div id="cmp-clock">elapsed 0.0s</div>
+    <div id="cmp-pace">pace
+      <button type="button" data-pace="0.25" class="on">0.25&times;</button>
+      <button type="button" data-pace="0.5">0.5&times;</button>
+      <button type="button" data-pace="1">1&times;</button>
+    </div>
+    <div class="cmp-row">
+      <div class="cmp-lane">
+        <div class="cmp-head">slow LLM &mdash; 1200 ms / decision</div>
+        <canvas id="cmp-slow" width="560" height="120"></canvas>
+        <div class="cmp-meta">
+          <span class="pbar"><i id="bar-slow"></i></span>
+          <span class="pct" id="pct-slow">0%</span>
+          <span class="stat">cleared <b id="cl-slow">0</b></span>
+          <span class="stat">coins <b id="co-slow">0</b></span>
+          <span class="stat" id="tally-slow">J:0 R:0 D:0</span>
+        </div>
+        <div class="cmp-log" id="log-slow"></div>
+      </div>
+      <div class="cmp-lane">
+        <div class="cmp-head">Cerebras &mdash; 50 ms / decision</div>
+        <canvas id="cmp-fast" width="560" height="120"></canvas>
+        <div class="cmp-meta">
+          <span class="pbar"><i id="bar-fast"></i></span>
+          <span class="pct" id="pct-fast">0%</span>
+          <span class="stat">cleared <b id="cl-fast">0</b></span>
+          <span class="stat">coins <b id="co-fast">0</b></span>
+          <span class="stat" id="tally-fast">J:0 R:0 D:0</span>
+        </div>
+        <div class="cmp-log" id="log-fast"></div>
+      </div>
+    </div>
+    <div id="cmp-verdict"></div>
+    <button id="cmp-restart" type="button">restart comparison</button>
+  </div>
+
+<script>
+const cv = document.getElementById('game');
+const cx = cv.getContext('2d');
+const overlay = document.getElementById('overlay');
+const W = cv.width, H = cv.height;
+const GROUND = 150;
+const DINO_H = 47;
+const GROUND_Y = GROUND - DINO_H;
+const INK = '#535353';
+
+const G = { state:'ready', speed:6, baseSpeed:6, score:0, hi:0, coins:0, t:0 };
+
+const dino = { x:50, y:GROUND_Y, w:44, h:DINO_H, vy:0, onGround:true, duckT:0 };
+const GRAVITY = 0.7;
+const JUMP_V = -12.5;
+const DUCK_H = 24;        // crouched hitbox height (vs standing DINO_H=47): passes UNDER bird_high
+const DUCK_TICKS = 22;    // frames the crouch is held after a duck command
+// bird_high is an OVERHEAD CEILING: a hazard hanging from the top down to just
+// above the crouch line. It spans the jump arc (so JUMPING rises into it = crash)
+// AND head height (so RUNNING into it = crash); only the crouched dino (top at
+// GROUND-DUCK_H = 126) clears under it. Truthful geometry, scored by hit().
+const BIRD_HIGH_TOP = 20;          // top of the ceiling (well inside the jump apex zone)
+const BIRD_HIGH_H   = GROUND - 52; // 98 -> bottom at 118, ~8px above the crouch line (126)
+
+let obstacles = [];
+let coins = [];
+let spawnTimer = 0;
+let coinTimer = 0;
+
+function spawnObstacle() {
+  // Balanced mix of THREE genuinely different correct actions:
+  //   cactus    -> JUMP over   (run/duck crash into it)
+  //   bird_high -> DUCK under  (JUMP rises into the ceiling = crash; run crashes)
+  //   bird_low  -> JUMP over   (run/duck crash into it)
+  const r = Math.random();
+  if (r < 0.35) {
+    const big = Math.random() < 0.5;
+    const w = big ? 25 : 17;
+    const h = big ? 50 : 35;
+    obstacles.push({ type:'cactus', x:W, y:GROUND - h, w, h });
+  } else if (r < 0.68) {
+    // overhead ceiling hanging from the top to just above the crouch line
+    obstacles.push({ type:'bird', high:true, x:W, y:BIRD_HIGH_TOP, w:34, h:BIRD_HIGH_H, flap:0 });
+  } else {
+    // low bird near the ground
+    obstacles.push({ type:'bird', high:false, x:W, y:GROUND - 24, w:34, h:24, flap:0 });
+  }
+}
+
+// Two coin kinds so reward no longer always favours JUMP:
+//   LOW (ground/standing height) -> only RUN (standing) collects; a jump flies
+//        OVER it and a duck's short hitbox is too low to reach it.
+//   HIGH (jump height)           -> only a JUMP reaches it (existing behaviour).
+const LOW_COIN_Y = GROUND - 50;            // center ~109: inside the standing body, above the crouch
+function spawnCoin() {
+  if (Math.random() < 0.45) {
+    coins.push({ x:W, y:LOW_COIN_Y, r:9, spin:0, low:true });               // run-through ground coin
+  } else {
+    coins.push({ x:W, y:GROUND - 90 + Math.random()*22, r:9, spin:0, low:false });  // high (jump grabs)
+  }
+}
+
+let groundOffset = 0;
+const bumps = [];
+for (let i=0;i<60;i++) bumps.push({ x:i*30 + Math.random()*20, len:Math.random()<0.3?6:0 });
+
+let clouds = [{x:300,y:50},{x:520,y:80}];
+
+/* =======================================================================
+   MOSAIC (Wolpert-Kawato) multi-expert control — replaces keyboard input.
+   Game physics/rendering (update body, draw, hit, coinHit, spawn) are NOT
+   touched; only how the jump/run action is decided.
+   ======================================================================= */
+
+// --- tunables ---
+const DIST_BUCKETS = [60, 140, 240];      // dx<60->0, <140->1, <240->2, else 3
+const DECISION_BUCKET = 2;                 // decide when the obstacle first reaches this bucket
+const COIN_RANGE = 240;                    // a coin within this dx counts as "ahead"
+const VAL = { bad: 0, ok: 5, good: 10 };   // forced 3-way LLM choice -> number (no free numbers)
+const BETA = 0.04;                         // softmax sharpness for the responsibility update
+let useRealLLM = false;                    // false = rule-based mock; true = Cerebras API
+
+// Execution only (sets jump velocity / arms the crouch); not a decision.
+function applyAction(action) {
+  if (action === 'jump' && dino.onGround) {
+    dino.vy = JUMP_V;
+    dino.onGround = false;
+  } else if (action === 'duck' && dino.onGround) {
+    dino.duckT = DUCK_TICKS;        // crouch in place (shortened hitbox)
+  }
+  // 'run' = no-op
+}
+
+// Raw pixel access — stays INSIDE game code, never sent to the LLM.
+function nextObstacleRaw() { return obstacles.find(o => o.x + o.w > dino.x) || null; }
+function nextCoinRaw()     { return coins.find(c => c.x + c.r > dino.x) || null; }
+function nextLowCoinRaw()  { return coins.find(c => c.low && !c.got && c.x + c.r > dino.x) || null; }
+function obstacleDx(o)     { return o.x - (dino.x + dino.w); }
+function distBucket(dx) {
+  if (dx < DIST_BUCKETS[0]) return 0;
+  if (dx < DIST_BUCKETS[1]) return 1;
+  if (dx < DIST_BUCKETS[2]) return 2;
+  return 3;
+}
+function classifyFront(o) {
+  if (!o) return 'none';
+  if (o.type === 'cactus') return o.h >= 45 ? 'cactus_big' : 'cactus_small';
+  return o.y <= GROUND - 36 ? 'bird_high' : 'bird_low';   // high = duck under; low = jump over
+}
+
+// (1) DISCRETE state — the ONLY thing the LLM ever sees (no raw pixels).
+function getWorldState() {
+  const o = nextObstacleRaw();
+  const db = o ? distBucket(obstacleDx(o)) : 3;
+  const c = nextCoinRaw();
+  const coinAhead = !!(c && (c.x - (dino.x + dino.w)) < COIN_RANGE);
+  return {
+    // name an obstacle only when it is actually CLOSE; a far/empty path reads
+    // 'none', so a clear stretch with a low coin is a genuine run-the-coin call.
+    front: (o && db <= DECISION_BUCKET) ? classifyFront(o) : 'none',
+    dist_bucket: db,
+    coin_ahead: coinAhead,
+    coin_low: coinAhead && !!c.low,        // nearest coin ahead is a ground/run coin
+    on_ground: dino.onGround,
+  };
+}
+window.getWorldState = getWorldState;
+
+// --- (3) MOSAIC core: N forward+inverse experts (no count hardcoded) -----
+// Each expert = {forward:"if I <action>, outcome?", inverse:"<action>"}.
+// Adding an action = adding ONE entry here; the stage 1-4 code below loops
+// over `experts`, so the softmax and the command already generalize to N.
+const experts = [
+  { id: 'jump', action: 'jump' },   // "if I jump, outcome?"  -> jump
+  { id: 'run',  action: 'run'  },   // "if I run,  outcome?"  -> run
+  { id: 'duck', action: 'duck' },   // "if I duck, outcome?"  -> duck   <- the only structural addition
+];
+const mosaic = { resp: {}, last: null };
+experts.forEach(e => { mosaic.resp[e.id] = 1 / experts.length; });   // uniform prior over N
+
+// (2) Decision/result gating — one decision per obstacle, scored once.
+const decision = { active:false, obs:null, kind:'obstacle', state:null, action:null,
+                   ready:false, coinsAt:0, preds:null };
+function resetDecision() {
+  decision.active = false; decision.obs = null; decision.kind = 'obstacle'; decision.state = null;
+  decision.action = null; decision.ready = false; decision.preds = null;
+}
+
+// --- (5) LLM seam: mock (rule-based) now, real Cerebras when toggled. ----
+// SINGLE SOURCE OF TRUTH for the active mode — read by BOTH the call path and
+// the overlay, so the overlay can never claim Cerebras unless a keyed call runs:
+//   unchecked            -> 'mock'
+//   checked + key present -> 'cerebras'
+//   checked + no key      -> 'mock-no-key' (falls back to mock)
+function llmKeyPresent() {
+  return ((((document.getElementById('llm-key') || {}).value) || '').trim().length > 0);
+}
+function llmMode() {
+  if (!useRealLLM) return 'mock';
+  return llmKeyPresent() ? 'cerebras' : 'mock-no-key';
+}
+async function callCerebrasLLM(prompt, temperature, meta) {
+  if (llmMode() !== 'cerebras') return mockLLM(meta);   // mock unless checked AND key present
+  return realCerebrasLLM(prompt, temperature);
+}
+// Rule-based stand-in returning the SAME forced 3-way JSON the real model must.
+// Correct action per situation (matches the real hitbox geometry):
+//   cactus_* -> jump,  bird_low -> jump (jump over),  bird_high -> duck (under it),
+//   none -> any. Reward: LOW coin -> RUN grabs it, HIGH coin -> JUMP grabs it.
+function mockLLM(meta) {
+  const { state, action } = meta;
+  let safety = 'bad';
+  if (state.front === 'none')           safety = 'good';
+  else if (state.front === 'bird_high') safety = (action === 'duck') ? 'good' : 'bad';  // ceiling: only duck clears
+  else /* cactus_* or bird_low */       safety = (action === 'jump') ? 'good' : 'bad';
+  // reward depends on the coin's height: a ground coin is run THROUGH (standing),
+  // an air coin needs a JUMP (but jumping into the bird_high ceiling crashes -> no coin).
+  let reward = 'bad';
+  if (state.coin_ahead) {
+    if (state.coin_low)                              reward = (action === 'run')  ? 'good' : 'bad';
+    else if (action === 'jump' && state.front !== 'bird_high') reward = 'good';
+  }
+  return JSON.stringify({ safety, reward });
+}
+async function realCerebrasLLM(prompt, temperature) {
+  const base  = (document.getElementById('llm-base')  || {}).value || 'https://api.cerebras.ai/v1';
+  const key   = (document.getElementById('llm-key')   || {}).value || '';
+  const model = (document.getElementById('llm-model') || {}).value || 'gemma-4-31b';
+  const res = await fetch(base.trim().replace(/\/+$/, '') + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key.trim() },
+    body: JSON.stringify({ model: model.trim(), temperature, max_tokens: 40,
+      response_format: { type: 'json_object' },
+      messages: [{ role: 'user', content: prompt }] }),
+  });
+  const data = await res.json();
+  return (data.choices && data.choices[0] && data.choices[0].message.content) || '{}';
+}
+function buildPrompt(state, action) {
+  return 'You are the FORWARD model of the "' + action + '" expert in a T-Rex runner.\n' +
+    'Discrete state: front=' + state.front + ', dist_bucket=' + state.dist_bucket +
+    ' (0=right ahead, 3=far), coin_ahead=' + state.coin_ahead + ', on_ground=' + state.on_ground + '.\n' +
+    'If the dino does "' + action + '" now, predict the outcome. Reply ONLY compact JSON, no prose:\n' +
+    '{"safety":"bad|ok|good","reward":"bad|ok|good"}\n' +
+    'safety: good = avoids crashing, bad = crashes. reward: good = eats a coin, bad = no coin.';
+}
+function parsePrediction(text) {
+  let safety = 'ok', reward = 'bad';
+  try {
+    const m = String(text).match(/\{[\s\S]*\}/);
+    const o = JSON.parse(m ? m[0] : text);
+    if (['bad','ok','good'].includes(o.safety)) safety = o.safety;
+    if (['bad','ok','good'].includes(o.reward)) reward = o.reward;
+  } catch (e) {}
+  return { safety: VAL[safety], reward: VAL[reward], sWord: safety, rWord: reward };
+}
+// Stage 1: a single expert's forward prediction for (state + its own action).
+async function predictExpert(state, action) {
+  return parsePrediction(await callCerebrasLLM(buildPrompt(state, action), 0, { state, action }));
+}
+
+// Stage 4: PREDICTION-FIRST command over N experts (no hardcoded count).
+// Score each expert by THIS turn's predicted value (safety+reward); responsibility
+// is used ONLY to break ties among equal predicted values (tiny ε term, far below
+// the minimum value gap of 5, so it can never override a better prediction). This
+// follows the current prediction instead of latching onto a once-trusted expert
+// whose responsibility has decayed to ~0. (Stage-3 responsibilities still update
+// and still drive the trust bars — they just no longer veto a correct prediction.)
+function decide(preds, resp) {
+  const EPS = 0.01;
+  let best = null, bestScore = -Infinity;
+  for (const e of experts) {
+    const p = preds[e.id] || { safety: 0, reward: 0 };
+    const s = (p.safety + p.reward) + EPS * (resp[e.id] || 0);
+    if (s > bestScore) { bestScore = s; best = e; }
+  }
+  return { action: best ? best.action : 'run' };
+}
+
+// Distance of the current decision TARGET (an obstacle or a low coin) ahead.
+function targetDx(d) {
+  return d.kind === 'coin' ? (d.obs.x - (dino.x + dino.w)) : obstacleDx(d.obs);
+}
+// Decision point: fire ONE (async) decision for this target (obstacle or low coin).
+function startDecision(target, kind) {
+  decision.active = true; decision.obs = target; decision.kind = kind || 'obstacle';
+  decision.ready = false; decision.state = getWorldState(); decision.coinsAt = G.coins;
+  const st = decision.state;
+  // Stage 1: forward prediction from EVERY expert, in parallel (loops over N).
+  Promise.all(experts.map(e => predictExpert(st, e.action))).then(results => {
+    if (!decision.active || decision.obs !== target) return;     // target changed; drop
+    const preds = {};
+    experts.forEach((e, i) => { preds[e.id] = results[i]; });
+    decision.preds = preds;
+    const cmd = decide(preds, mosaic.resp);
+    decision.action = cmd.action; decision.ready = true;
+    // display snapshot (panel reads this; no effect on the math)
+    mosaic.last = { front: st.front, coin: st.coin_ahead, coinLow: st.coin_low,
+      preds, resp: Object.assign({}, mosaic.resp), command: cmd.action, actual: null };
+  });
+}
+
+// (4) Deterministic actual outcome, computed by CODE at the result point.
+// safety/reward come from the REAL hitbox result of the EXECUTED action (crash?),
+// so duck/jump/run are all scored truthfully — no per-action special-casing.
+function actualOutcome(action, front, gotCoin, crashed) {
+  return { safety: crashed ? 0 : 10, reward: gotCoin ? 10 : 0 };
+}
+function sq(x) { return x * x; }
+// Stages 2-3: squared error of each forward prediction vs actual -> softmax over
+// the N experts -> responsibilities. Loops over `experts`; nothing hardcoded to 2.
+function scoreResult(crashed) {
+  if (!decision.ready || !decision.preds) return;
+  const gotCoin = G.coins > decision.coinsAt;
+  const actual = actualOutcome(decision.action, decision.state.front, gotCoin, crashed);
+  const w = {}, errs = {}; let z = 0;
+  for (const e of experts) {
+    const p = decision.preds[e.id] || { safety: 0, reward: 0 };
+    const err = sq(p.safety - actual.safety) + sq(p.reward - actual.reward);   // stage 2
+    errs[e.id] = err; w[e.id] = Math.exp(-BETA * err); z += w[e.id];           // stage 3 (softmax)
+  }
+  if (z > 0) for (const e of experts) mosaic.resp[e.id] = w[e.id] / z;
+  // display snapshot for the experts panel — plain outcome, NO error/softmax shown.
+  mosaic.last = { front: decision.state.front, coin: decision.state.coin_ahead, coinLow: decision.state.coin_low,
+    preds: decision.preds, resp: Object.assign({}, mosaic.resp), command: decision.action,
+    actual: { crashed: !!crashed, gotCoin: gotCoin } };
+}
+
+// Per-frame control seam (replaces the per-frame keyboard decide()).
+function controlStep() {
+  const nextObs = nextObstacleRaw();
+  // RESULT POINT: the locked target passed the dino (or was collected) -> score once.
+  if (decision.active && decision.obs) {
+    const o = decision.obs;
+    const passed = decision.kind === 'coin'
+      ? (o.got || !coins.includes(o) || (o.x + o.r < dino.x))   // coin collected or gone past
+      : (!obstacles.includes(o) || (o.x + o.w < dino.x));        // obstacle gone past
+    if (passed) { scoreResult(false); resetDecision(); }
+  }
+  // DECISION POINT (no re-deciding): an obstacle reaching the decision bucket
+  // takes priority; otherwise, on a CLEAR stretch (no close obstacle) a low coin
+  // in range triggers a "run the coin" decision where RUN is uniquely correct.
+  if (!decision.active) {
+    const obsDx = nextObs ? obstacleDx(nextObs) : Infinity;
+    if (nextObs && distBucket(obsDx) <= DECISION_BUCKET) {
+      startDecision(nextObs, 'obstacle');
+    } else {
+      const lowCoin = nextLowCoinRaw();
+      const coinDx = lowCoin ? (lowCoin.x - (dino.x + dino.w)) : Infinity;
+      if (lowCoin && coinDx <= COIN_RANGE && obsDx > DIST_BUCKETS[2]) {   // clear path + coin ahead
+        startDecision(lowCoin, 'coin');
+      }
+    }
+  }
+  // EXECUTION: carry out the committed action when the target is close. For a
+  // low-coin RUN decision applyAction('run') is a no-op — the standing dino just
+  // runs through the coin (collected by coinHit); a jump/duck would miss it.
+  if (decision.active && decision.ready && dino.onGround &&
+      targetDx(decision) <= Math.max(50, G.speed * 15)) {
+    applyAction(decision.action);
+  }
+}
+
+function update() {
+  G.t++;
+  G.speed = G.baseSpeed + Math.floor(G.score / 100) * 0.4;
+
+  controlStep();   // MOSAIC: decision gating + execution (was: applyAction(decide(getWorldState())))
+
+  dino.vy += GRAVITY;
+  dino.y += dino.vy;
+  if (dino.y >= GROUND_Y) { dino.y = GROUND_Y; dino.vy = 0; dino.onGround = true; }
+  if (dino.duckT > 0) dino.duckT--;     // duck: crouch decays after the command
+
+  for (const o of obstacles) {
+    o.x -= G.speed;
+    if (o.type === 'bird') o.flap = (o.flap + 0.2) % 2;
+  }
+  obstacles = obstacles.filter(o => o.x + o.w > -10);
+
+  for (const c of coins) { c.x -= G.speed; c.spin = (c.spin + 0.15) % 2; }
+  coins = coins.filter(c => c.x + c.r > -10);
+
+  spawnTimer -= G.speed;
+  if (spawnTimer <= 0) { spawnObstacle(); spawnTimer = 350 + Math.random()*300; }
+
+  coinTimer -= G.speed;
+  if (coinTimer <= 0) { spawnCoin(); coinTimer = 250 + Math.random()*350; }
+
+  for (const o of obstacles) { if (hit(dino, o)) { gameOver(); return; } }
+
+  for (const c of coins) {
+    if (coinHit(dino, c)) { c.got = true; G.coins++; }
+  }
+  coins = coins.filter(c => !c.got);
+
+  groundOffset = (groundOffset + G.speed) % 30;
+  for (const cl of clouds) {
+    cl.x -= G.speed * 0.3;
+    if (cl.x < -60) { cl.x = W + Math.random()*100; cl.y = 40 + Math.random()*60; }
+  }
+
+  G.score += 0.15 * (G.speed / G.baseSpeed);
+}
+
+function hit(d, o) {
+  const pad = 6;
+  // While ducking (on the ground), the hitbox is short and low -> passes UNDER
+  // a head-height bird_high, but still hits cacti / low birds.
+  const ducking = d.duckT > 0 && d.onGround;
+  const top = ducking ? (GROUND - DUCK_H) : d.y;
+  const h   = ducking ? DUCK_H : d.h;
+  return d.x + pad < o.x + o.w && d.x + d.w - pad > o.x &&
+         top + pad < o.y + o.h && top + h - pad > o.y;
+}
+
+// Collection uses the dino's CURRENT pose box (same geometry as hit()): standing
+// when running, the short low box when ducking, the raised box when airborne. So
+// a LOW coin is grabbed only by running — a jump flies over it, a duck is too low.
+function coinHit(d, c) {
+  const ducking = d.duckT > 0 && d.onGround;
+  const top = ducking ? (GROUND - DUCK_H) : d.y;
+  const h   = ducking ? DUCK_H : d.h;
+  const cxp = c.x + c.r, cyp = c.y + c.r;
+  const nx = Math.max(d.x, Math.min(cxp, d.x + d.w));
+  const ny = Math.max(top, Math.min(cyp, top + h));
+  const dx = cxp - nx, dy = cyp - ny;
+  return dx*dx + dy*dy < c.r*c.r;
+}
+
+function draw() {
+  cx.clearRect(0,0,W,H);
+  cx.fillStyle = INK;
+
+  for (const cl of clouds) drawCloud(cl.x, cl.y);
+
+  cx.fillRect(0, GROUND, W, 2);
+  for (let i=0;i<bumps.length;i++) {
+    const b = bumps[i];
+    let x = (b.x - groundOffset) % (W+60);
+    if (x < 0) x += W+60;
+    if (b.len) cx.fillRect(x, GROUND + 3, b.len, 2);
+  }
+
+  drawDino();
+
+  for (const o of obstacles) {
+    if (o.type === 'cactus') drawCactus(o);
+    else drawBird(o);
+  }
+
+  for (const c of coins) drawCoin(c);
+
+  cx.font = 'bold 16px "Courier New",monospace';
+  cx.textAlign = 'right';
+  const s = String(Math.floor(G.score)).padStart(5,'0');
+  cx.fillText(s, W - 15, 30);
+  cx.textAlign = 'left';
+
+  // 동전 카운터 (왼쪽 위)
+  drawCoinIcon(20, 22);
+  cx.font = 'bold 16px "Courier New",monospace';
+  cx.fillText('x ' + G.coins, 38, 30);
+}
+
+function drawDino() {
+  const x = dino.x;
+  if (dino.duckT > 0 && dino.onGround) {
+    // crouched pose: short, low body (head tucked under head-height obstacles)
+    const y = GROUND - DUCK_H;
+    cx.fillRect(x+12, y, 32, 13);          // long low body
+    cx.clearRect(x+38, y+3, 4, 4);         // eye
+    cx.fillRect(x, y+5, 16, 8);            // tail
+    cx.fillRect(x+16, y+13, 8, 11);        // legs
+    cx.fillRect(x+30, y+13, 8, 11);
+    return;
+  }
+  const y = dino.y;
+  cx.fillRect(x+18, y, 26, 22);
+  cx.clearRect(x+36, y+5, 4, 4);
+  cx.fillRect(x+10, y+18, 24, 18);
+  cx.fillRect(x, y+22, 14, 8);
+  cx.fillRect(x+12, y+34, 8, 13);
+  cx.fillRect(x+24, y+34, 8, 13);
+  cx.fillRect(x+34, y+22, 10, 5);
+}
+
+function drawCactus(o) {
+  cx.fillRect(o.x + o.w/2 - 4, o.y, 8, o.h);
+  cx.fillRect(o.x, o.y + o.h*0.3, 5, o.h*0.3);
+  cx.fillRect(o.x, o.y + o.h*0.3, o.w*0.4, 5);
+  cx.fillRect(o.x + o.w - 5, o.y + o.h*0.45, 5, o.h*0.3);
+  cx.fillRect(o.x + o.w*0.6, o.y + o.h*0.45, o.w*0.4, 5);
+}
+
+function drawBird(o) {
+  if (o.high) {
+    // OVERHEAD CEILING hanging from the top down to ~head height — DUCK under it.
+    cx.fillRect(o.x, o.y, o.w, o.h);                          // solid hanging column
+    cx.clearRect(o.x + 6, o.y + 16, o.w - 12, 3);            // ridge lines (texture, monochrome)
+    cx.clearRect(o.x + 6, o.y + o.h - 24, o.w - 12, 3);
+    cx.fillRect(o.x - 4, o.y + o.h - 6, o.w + 8, 6);          // overhanging bottom lip (the duck line)
+    return;
+  }
+  // low bird near the ground — JUMP over it
+  const up = o.flap < 1;
+  cx.fillRect(o.x+10, o.y+8, 18, 8);
+  cx.fillRect(o.x+26, o.y+6, 8, 5);
+  if (up) cx.fillRect(o.x, o.y, 14, 5);
+  else cx.fillRect(o.x, o.y+14, 14, 5);
+}
+
+function drawCoin(c) {
+  const cxp = c.x + c.r, cyp = c.y + c.r;
+  const wobble = Math.abs(Math.cos(c.spin * Math.PI));
+  cx.save();
+  cx.translate(cxp, cyp);
+  cx.fillStyle = INK;
+  cx.beginPath();
+  cx.ellipse(0, 0, Math.max(2, c.r*wobble), c.r, 0, 0, Math.PI*2);
+  cx.fill();
+  cx.fillStyle = '#fff';
+  cx.beginPath();
+  cx.ellipse(0, 0, Math.max(0.5, (c.r-3)*wobble), c.r-3, 0, 0, Math.PI*2);
+  cx.fill();
+  cx.restore();
+  cx.fillStyle = INK;
+}
+
+function drawCoinIcon(x, y) {
+  cx.fillStyle = INK;
+  cx.beginPath();
+  cx.arc(x, y, 8, 0, Math.PI*2);
+  cx.fill();
+  cx.fillStyle = '#fff';
+  cx.beginPath();
+  cx.arc(x, y, 5, 0, Math.PI*2);
+  cx.fill();
+  cx.fillStyle = INK;
+}
+
+function drawCloud(x,y) {
+  cx.save();
+  cx.strokeStyle = '#c9c9c9';
+  cx.lineWidth = 2;
+  cx.beginPath();
+  cx.arc(x, y, 9, Math.PI*0.5, Math.PI*1.5);
+  cx.arc(x+12, y-6, 11, Math.PI, Math.PI*2);
+  cx.arc(x+26, y, 9, Math.PI*1.5, Math.PI*0.5);
+  cx.lineTo(x, y+9);
+  cx.stroke();
+  cx.restore();
+}
+
+// --- (6) Experts panel (top-right): each expert's plain-language prediction,
+// the actual result beside it once known (✓/✗), and a trust (responsibility)
+// bar that visibly shifts to whoever was right. No error/softmax numbers.
+function drawDebug() {
+  const el = document.getElementById('dbg');
+  if (!el) return;
+  const live = getWorldState();
+  const L = mosaic.last;
+  const pct = x => Math.round(x * 100) + '%';
+  const a = L ? L.actual : null;
+  const sitFront = L ? L.front : live.front;          // the DECISION being shown
+  const sitCoin  = L ? L.coin : live.coin_ahead;
+  // ✓/✗ = was THIS expert's safe-vs-crash call right? (distinct from ▶ = chosen)
+  const verdict = p => (!a || !p) ? '' : (((p.safety > 0) === (!a.crashed)) ? '✓' : '✗');
+  let h = '<div class="title">EXPERTS</div>';
+  // one coherent situation header for the scored decision
+  h += '<div class="sit"><span class="k">situation</span> <b>' + sitFront + '</b>' +
+       (sitCoin ? ' <b>◎</b>' : '') + '</div>';
+  if (L && a) h += '<div class="res"><span class="k dim">result</span> <b>' + (a.crashed ? 'CRASH' : 'SAFE') + (a.gotCoin ? ' ◎' : '') + '</b></div>';
+  else        h += '<div class="res dim">deciding…</div>';
+  h += '<hr>';
+  for (const e of experts) {
+    const p = L && L.preds ? L.preds[e.id] : null;
+    const r = mosaic.resp[e.id] || 0;
+    const chosen = L && L.command === e.action;
+    const safe = p ? (p.safety > 0) : null;
+    h += '<div class="erow' + (chosen ? ' chosen' : '') + '">' +
+           '<span class="nm"><span class="mk">' + (chosen ? '▶' : '') + '</span>' + e.id.toUpperCase() + '</span>' +
+           '<span class="tp">' + pct(r) + '</span>' +
+           '<span class="vg">' + verdict(p) + '</span>' +
+         '</div>';
+    h += '<div class="pr">predicts ' + (safe === null ? '—' : (safe ? 'SAFE' : 'CRASH')) +
+         (p && p.reward > 0 ? ' ◎' : '') + '</div>';
+    h += '<div class="bar"><i style="width:' + pct(r) + '"></i></div>';
+  }
+  h += '<hr>';
+  h += '<div class="legend dim">▶ chosen &nbsp; ✓/✗ was it right</div>';
+  h += '<div class="next dim">now approaching: ' + live.front + '</div>';
+  const _m = llmMode();
+  const _lbl = _m === 'cerebras' ? 'Cerebras' : _m === 'mock-no-key' ? 'mock (no key)' : 'mock';
+  h += '<div class="llm dim">LLM: ' + _lbl + '</div>';
+  el.innerHTML = h;
+}
+
+/* =======================================================================
+   COMPARISON MODE (additive; single-game logic untouched).
+   Two dinos on the SAME seeded course. They make the SAME (correct) MOSAIC
+   judgment at every obstacle — the ONLY difference is decision latency. The
+   world HOLDS at each decision until it returns, so neither dino ever dies
+   from being slow. In equal elapsed time the fast (Cerebras, 50ms) runner
+   covers far more course than the slow (1200ms) one: speed = throughput.
+   ======================================================================= */
+function nowMs() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
+
+const CMP = {
+  slowMs: 1200, fastMs: 50,          // fixed decision latency per decision point
+  speedPxps: 2200,                   // course px/sec while RUNNING (fast travel so the
+                                     // decision PAUSE dominates the cycle -> big throughput gap)
+  spacingMin: 80, spacingVar: 60,    // course distance between obstacles
+  decideAhead: 110,                  // begin deciding when an obstacle is this far ahead
+  count: 64,                         // obstacles in the course
+  timeCapMs: 30000,                  // safety cap on the demo
+  seed: 0x5eed1234,                  // SAME seed for both runners -> identical course
+};
+const MINI = { W: 560, H: 120, ground: 95, dinoX: 70, dinoH: 24, grav: 0.9, jump: -11 };
+// pace = playback scale (virtual-time per real-time). <1 = slow motion so each
+// decision pause is readable. Default slow. Does NOT change the simulated
+// dynamics — only how fast that fixed simulation is replayed.
+const cmp = { running: false, elapsed: 0, vt: 0, lastNow: 0, pace: 0.25,
+              slow: null, fast: null, ctxSlow: null, ctxFast: null, inited: false };
+
+// Deterministic PRNG so both runners (and reruns) get the identical course.
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+// Build the shared course: obstacles {dist,o} AND coins {dist,y} at increasing
+// positions (same obstacle/coin types + spawn rules as single play). Both
+// runners read this ONE object, so their courses are byte-identical.
+function genCourse(seed) {
+  const rng = mulberry32(seed);
+  const items = []; const coins = []; let x = 360;
+  for (let i = 0; i < CMP.count; i++) {
+    x += CMP.spacingMin + rng() * CMP.spacingVar;
+    // Balanced mix so ALL THREE actions fire: ~32% cactus (JUMP), ~25% bird_high
+    // (DUCK), ~22% bird_low (JUMP-over), ~21% low coin on a clear stretch (RUN).
+    let o; const r1 = rng();
+    if (r1 < 0.32)      { const big = rng() < 0.5; o = { kind: 'cactus', h: big ? 50 : 35 }; }
+    else if (r1 < 0.57) { o = { kind: 'bird', y: GROUND - 70, high: true };  }   // bird_high -> DUCK
+    else if (r1 < 0.79) { o = { kind: 'bird', y: GROUND - 30, high: false }; }   // bird_low  -> JUMP
+    else                { o = { kind: 'lowcoin' };                           }   // ground coin -> RUN through it
+    items.push({ dist: Math.round(x), o });
+    // coin spawning, same idea as single play: a flag at jump height between obstacles
+    if (rng() < 0.55) coins.push({ dist: Math.round(x + 35 + rng() * 45), y: GROUND - 30 - rng() * 55 });
+  }
+  return { items, coins, len: Math.round(x + 320) };
+}
+function makeRunner(latencyMs, course) {
+  return { latency: latencyMs, course, pos: 0, idx: 0, coinIdx: 0, deciding: false, decideUntil: 0, decideStart: 0,
+           lastCmd: null, pendingFront: '', cleared: 0, coinsGot: 0, duckT: 0,
+           tally: { jump: 0, run: 0, duck: 0 }, done: false, log: [],
+           dinoY: MINI.ground - MINI.dinoH, dinoVy: 0, onGround: true };
+}
+// Discrete "front" of a course item (same vocabulary the LLM sees). A low coin
+// sits on a clear stretch -> front 'none' (no obstacle).
+function frontOf(o) {
+  if (o.kind === 'lowcoin') return 'none';
+  return classifyFront(o.kind === 'cactus' ? { type: 'cactus', h: o.h, y: 0 } : { type: 'bird', y: o.y });
+}
+// Comparison uses the SAME action mapping as single play (self-contained):
+//   bird_high -> DUCK (crouch under), cacti & bird_low -> JUMP (over),
+//   low coin on a clear stretch -> RUN (stand and run through it).
+// Both runners agree; only latency differs.
+function cmpDecide(o) {
+  if (o.kind === 'lowcoin') return 'run';
+  return frontOf(o) === 'bird_high' ? 'duck' : 'jump';
+}
+// Advance one runner by virtual elapsed dt (ms). World HOLDS while deciding.
+// (Pacing only scales how dt/now relate to real time; the dynamics are fixed.)
+function cmpStep(r, now, dt) {
+  if (r.done) return;
+  // cosmetic jump physics
+  r.dinoVy += MINI.grav; r.dinoY += r.dinoVy;
+  if (r.dinoY >= MINI.ground - MINI.dinoH) { r.dinoY = MINI.ground - MINI.dinoH; r.dinoVy = 0; r.onGround = true; }
+  if (r.duckT > 0) r.duckT--;                       // cosmetic crouch decays
+
+  if (r.deciding) {                                  // world held until the decision returns
+    if (now >= r.decideUntil) {
+      const it = r.course.items[r.idx];
+      r.pendingFront = it ? frontOf(it.o) : 'none';
+      r.lastCmd = it ? cmpDecide(it.o) : 'run';      // SAME correct judgment, just delayed
+      r.deciding = false;
+    }
+    return;
+  }
+  r.pos += CMP.speedPxps * dt / 1000;                // RUN: advance the course
+  // coin collection — identical rule for both runners (collect each coin the
+  // runner reaches on the shared course).
+  while (r.coinIdx < r.course.coins.length && r.pos >= r.course.coins[r.coinIdx].dist) {
+    r.coinsGot++; r.coinIdx++;
+  }
+  const it = r.course.items[r.idx];
+  if (it) {
+    const ahead = it.dist - r.pos;
+    if (ahead <= CMP.decideAhead && r.lastCmd === null) {   // reach a decision point -> hold + decide
+      r.deciding = true; r.decideStart = now; r.decideUntil = now + r.latency;
+      return;
+    }
+    if (r.lastCmd === 'duck' && ahead <= 40) r.duckT = 16;   // crouch as the bird arrives (DUCK)
+    if (r.pos >= it.dist) {                          // item reached -> cleared (never dies)
+      if (r.lastCmd === 'jump' && r.onGround) { r.dinoVy = MINI.jump; r.onGround = false; }   // hop over
+      const a = r.lastCmd || 'run';
+      r.tally[a] = (r.tally[a] || 0) + 1;            // per-action usage tally
+      if (it.o.kind === 'lowcoin' && a === 'run') r.coinsGot++;   // ran through the ground coin
+      // per-decision step log (front -> command -> result)
+      const word = it.o.kind === 'lowcoin' ? '  grab' : '  pass';
+      r.log.unshift('#' + (r.cleared + 1) + '  ' + (r.pendingFront || '?') + ' -> ' + a.toUpperCase() + word);
+      if (r.log.length > 5) r.log.pop();
+      r.cleared++; r.idx++; r.lastCmd = null;
+    }
+  }
+  if (r.pos >= r.course.len) { r.pos = r.course.len; r.done = true; }
+}
+function cmpProgress(r) { return Math.min(100, r.pos / r.course.len * 100); }
+
+function drawCmpObs(ctx, o, sx) {
+  const g = MINI.ground;
+  if (o.kind === 'lowcoin') {
+    // ground coin at standing-body height — RUN through it (jump/duck miss)
+    const cy = g - 13;
+    ctx.beginPath(); ctx.arc(sx + 8, cy, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(sx + 8, cy, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = INK;
+    return;
+  }
+  if (o.kind === 'cactus') {
+    const h = o.h * 0.5;                              // scale to mini canvas
+    ctx.fillRect(sx, g - h, 10, h);
+    ctx.fillRect(sx - 5, g - h * 0.6, 5, 5); ctx.fillRect(sx + 10, g - h * 0.75, 5, 5);
+  } else if (o.high) {
+    // overhead ceiling hanging from the top to just above the crouch line — DUCK under
+    const bottom = g - 19;                            // crouch top is g-13 (=82); bottom (76) clears it
+    ctx.fillRect(sx, 4, 16, bottom - 4);
+    ctx.fillRect(sx - 3, bottom - 5, 22, 5);          // bottom lip
+  } else {
+    // low bird near the ground — JUMP over
+    ctx.fillRect(sx, g - 22, 18, 7);
+    ctx.fillRect(sx, g - 26, 6, 4);
+  }
+}
+function drawCmpCoin(ctx, c, sx) {
+  const cy = MINI.ground - (GROUND - c.y);   // same height above ground as single play
+  ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(sx, cy, 6, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(sx, cy, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = INK;
+}
+function cmpDrawLane(ctx, r) {
+  if (!ctx) return;
+  ctx.clearRect(0, 0, MINI.W, MINI.H);
+  ctx.fillStyle = INK;
+  ctx.fillRect(0, MINI.ground, MINI.W, 2);
+  // dino — three visually distinct poses: DUCK = crouched/low, JUMP = hop (dinoY
+  // raised), RUN = normal standing. (dy is also used by the deciding indicator.)
+  const dx = MINI.dinoX, dy = r.dinoY;
+  if (r.duckT > 0 && r.onGround) {
+    const yy = MINI.ground - 13;                       // crouched: short, low body
+    ctx.fillRect(dx - 2, yy, 28, 11);
+    ctx.fillRect(dx + 21, yy - 3, 7, 6);               // head reaching forward
+    ctx.fillRect(dx + 3, yy + 11, 6, 2); ctx.fillRect(dx + 15, yy + 11, 6, 2);
+  } else {
+    ctx.fillRect(dx, dy, 22, 18);
+    ctx.fillRect(dx - 8, dy + 4, 10, 7);
+    ctx.fillRect(dx + 4, dy + 18, 6, 8); ctx.fillRect(dx + 13, dy + 18, 6, 8);
+  }
+  // upcoming coins (uncollected)
+  for (let i = r.coinIdx; i < r.course.coins.length; i++) {
+    const sx = dx + (r.course.coins[i].dist - r.pos);
+    if (sx > MINI.W + 40) break;
+    if (sx < -40) continue;
+    drawCmpCoin(ctx, r.course.coins[i], sx);
+  }
+  // obstacles (from idx-1 so a just-passed bird lingers a moment — you see the
+  // dino crouched as the bird passes overhead, then recede behind it)
+  for (let i = Math.max(0, r.idx - 1); i < r.course.items.length; i++) {
+    const sx = dx + (r.course.items[i].dist - r.pos);
+    if (sx > MINI.W + 40) break;
+    if (sx < -40) continue;
+    drawCmpObs(ctx, r.course.items[i].o, sx);
+  }
+  if (r.deciding) {
+    ctx.font = 'bold 11px "Courier New",monospace';
+    ctx.fillText('…deciding (' + r.latency + 'ms)', dx, 15);
+    // pause indicator on the dino (||) + a wait bar that fills as the latency elapses
+    ctx.fillRect(dx + 4, dy - 11, 3, 7); ctx.fillRect(dx + 11, dy - 11, 3, 7);
+    const bw = 64, bh = 6, bx = dx, by = 22;
+    const frac = Math.max(0, Math.min(1, (cmp.vt - r.decideStart) / r.latency));
+    ctx.lineWidth = 1; ctx.strokeStyle = INK; ctx.strokeRect(bx, by, bw, bh);
+    ctx.fillRect(bx, by, bw * frac, bh);
+  } else if (r.done) {
+    ctx.font = 'bold 11px "Courier New",monospace';
+    ctx.fillText('FINISHED', dx, 15);
+  }
+}
+function cmpSet(id, txt) { const el = document.getElementById(id); if (el) el.textContent = txt; }
+function cmpSetHTML(id, html) { const el = document.getElementById(id); if (el) el.innerHTML = html; }
+function cmpUpdateHUD() {
+  cmpSet('cmp-clock', 'elapsed ' + (cmp.elapsed / 1000).toFixed(1) + 's  (pace ' + cmp.pace + '×)');
+  for (const [r, suf] of [[cmp.slow, 'slow'], [cmp.fast, 'fast']]) {
+    const p = cmpProgress(r);
+    const bar = document.getElementById('bar-' + suf); if (bar) bar.style.width = p.toFixed(1) + '%';
+    cmpSet('pct-' + suf, p.toFixed(0) + '%');
+    cmpSet('cl-' + suf, String(r.cleared));
+    cmpSet('co-' + suf, String(r.coinsGot));
+    cmpSet('tally-' + suf, 'J:' + r.tally.jump + ' R:' + r.tally.run + ' D:' + r.tally.duck);
+    cmpSetHTML('log-' + suf, r.log.length ? r.log.join('<br>') : '<span style="color:#9a9a9a">…waiting for first decision</span>');
+  }
+}
+function cmpVerdict() {
+  const slowP = Math.round(cmpProgress(cmp.slow)), fastP = Math.round(cmpProgress(cmp.fast));
+  cmpSet('cmp-verdict',
+    'Same elapsed time (' + (cmp.elapsed / 1000).toFixed(1) + 's) — both judged correctly, neither died, ' +
+    'but the slow LLM covered only ' + slowP + '% (' + cmp.slow.coinsGot + ' coins) while Cerebras reached ' +
+    fastP + '% (' + cmp.fast.coinsGot + ' coins) — because it pauses ~' + CMP.slowMs +
+    'ms at every decision. Speed = throughput, not survival.');
+}
+function cmpFrame(now) {
+  if (!cmp.running) return;
+  const realDt = Math.min(100, now - cmp.lastNow); cmp.lastNow = now;
+  const dt = realDt * cmp.pace;            // scale real time -> virtual (slow-motion when pace<1)
+  cmp.vt += dt; cmp.elapsed = cmp.vt;      // simulated elapsed (consistent across paces)
+  cmpStep(cmp.slow, cmp.vt, dt);
+  cmpStep(cmp.fast, cmp.vt, dt);
+  cmpDrawLane(cmp.ctxSlow, cmp.slow);
+  cmpDrawLane(cmp.ctxFast, cmp.fast);
+  cmpUpdateHUD();
+  if (cmp.fast.done || cmp.elapsed >= CMP.timeCapMs) { cmp.running = false; cmpVerdict(); }
+}
+function cmpInit() {
+  if (cmp.inited) return;
+  const a = document.getElementById('cmp-slow'), b = document.getElementById('cmp-fast');
+  cmp.ctxSlow = a && a.getContext('2d'); cmp.ctxFast = b && b.getContext('2d');
+  cmp.inited = true;
+}
+function cmpStart() {
+  cmpInit();
+  const course = genCourse(CMP.seed);                // ONE shared course -> identical for both
+  cmp.slow = makeRunner(CMP.slowMs, course);
+  cmp.fast = makeRunner(CMP.fastMs, course);
+  cmp.elapsed = 0; cmp.vt = 0; cmp.lastNow = nowMs(); cmp.running = true;
+  cmpSet('cmp-verdict', '');
+}
+
+let mode = 'single';                                  // default: single play
+function setMode(m) {
+  mode = m;
+  const tog = (id, on) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !on); };
+  tog('wrap', m === 'single'); tog('hint', m === 'single'); tog('cfg', m === 'single');
+  tog('cmp', m === 'compare');
+  const ms = document.getElementById('mode-single'), mc = document.getElementById('mode-compare');
+  if (ms) ms.classList.toggle('on', m === 'single');
+  if (mc) mc.classList.toggle('on', m === 'compare');
+  if (m === 'compare') cmpStart();
+}
+
+function loop() {
+  if (mode === 'compare') {
+    cmpFrame(nowMs());
+  } else {
+    G.loopT = (G.loopT || 0) + 1;
+    if (G.state === 'running') update();
+    draw();
+    drawDebug();
+    updateHint();   // keep the driving hint consistent with llmMode() every frame
+    if (G.state === 'ready') start();                                            // AI auto-starts
+    else if (G.state === 'over' && G.loopT - (G.overAtLoop || 0) > 45) start();   // auto-restart to keep learning
+  }
+  requestAnimationFrame(loop);
+}
+
+function start() {
+  G.state = 'running';
+  G.score = 0; G.speed = G.baseSpeed; G.coins = 0; G.t = 0;
+  obstacles = []; coins = []; spawnTimer = 200; coinTimer = 150;
+  dino.y = GROUND_Y; dino.vy = 0; dino.onGround = true; dino.duckT = 0;
+  resetDecision();                 // responsibilities (mosaic.*) persist across runs
+  overlay.textContent = '';
+}
+
+function gameOver() {
+  if (decision.active && decision.ready) scoreResult(true);   // result point on collision
+  resetDecision();
+  G.state = 'over';
+  G.overAtLoop = G.loopT;
+  if (G.score > G.hi) G.hi = G.score;
+  overlay.textContent = '';        // MOSAIC auto-restarts
+}
+
+// MOSAIC drives jumping; keys/clicks only (re)start. No per-frame keyboard control.
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') {
+    e.preventDefault();
+    if (G.state === 'ready' || G.state === 'over') start();
+  }
+});
+cv.addEventListener('pointerdown', () => {
+  if (G.state === 'ready' || G.state === 'over') start();
+});
+// --- Driving hint + real-Cerebras key modal (single source of truth: llmMode) ---
+function updateHint() {
+  const el = document.getElementById('hint');
+  if (!el) return;
+  el.textContent = (llmMode() === 'cerebras')
+    ? 'MOSAIC AI is driving (Cerebras) · SPACE = restart'
+    : 'MOSAIC AI is NOT driving (mock) · SPACE = restart';
+}
+const realChk = document.getElementById('llm-real');
+function openKeyModal() {
+  const m = document.getElementById('keymodal'); if (!m) return;
+  const inp = document.getElementById('keymodal-input');
+  if (inp) { inp.value = (document.getElementById('llm-key') || {}).value || ''; }
+  m.classList.remove('hidden');
+  if (inp && inp.focus) inp.focus();
+}
+function closeKeyModal() { const m = document.getElementById('keymodal'); if (m) m.classList.add('hidden'); }
+function keyModalOK() {
+  const key = (((document.getElementById('keymodal-input') || {}).value) || '').trim();
+  if (!key) { keyModalCancel(); return; }                 // empty key -> treat as cancel
+  const kf = document.getElementById('llm-key'); if (kf) kf.value = key;
+  useRealLLM = true; if (realChk) realChk.checked = true;  // commit real mode
+  closeKeyModal(); updateHint();
+  start();                                                 // fresh run under real Cerebras
+}
+function keyModalCancel() {
+  if (realChk) realChk.checked = false; useRealLLM = false; // revert to mock
+  closeKeyModal(); updateHint();
+}
+if (realChk) realChk.addEventListener('change', () => {
+  if (realChk.checked) openKeyModal();                     // checking -> ask for a key first
+  else { useRealLLM = false; updateHint(); }               // unchecking -> back to mock
+});
+const _kOk = document.getElementById('keymodal-ok');
+const _kCancel = document.getElementById('keymodal-cancel');
+const _kInput = document.getElementById('keymodal-input');
+const _kModal = document.getElementById('keymodal');
+if (_kOk) _kOk.addEventListener('click', keyModalOK);
+if (_kCancel) _kCancel.addEventListener('click', keyModalCancel);
+if (_kInput) _kInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); keyModalOK(); }
+  else if (e.key === 'Escape') { e.preventDefault(); keyModalCancel(); }
+});
+if (_kModal) _kModal.addEventListener('click', e => { if (e.target === _kModal) keyModalCancel(); });
+updateHint();   // on load: mock -> "NOT driving"
+
+// Mode toggle (single play <-> comparison). Default single.
+const msBtn = document.getElementById('mode-single');
+const mcBtn = document.getElementById('mode-compare');
+if (msBtn) msBtn.addEventListener('click', () => setMode('single'));
+if (mcBtn) mcBtn.addEventListener('click', () => setMode('compare'));
+const cmpRestart = document.getElementById('cmp-restart');
+if (cmpRestart) cmpRestart.addEventListener('click', () => cmpStart());
+// Pace buttons (0.25× / 0.5× / 1×) — scale comparison playback speed only.
+document.querySelectorAll('#cmp-pace button').forEach(b => {
+  b.addEventListener('click', () => {
+    cmp.pace = parseFloat(b.getAttribute('data-pace')) || 1;
+    document.querySelectorAll('#cmp-pace button').forEach(x => x.classList.toggle('on', x === b));
+  });
+});
+
+// Test hooks (used by the headless harness; no effect in the browser).
+if (typeof window !== 'undefined') {
+  window.TREX = {
+    G, dino, mosaic, decision, experts,
+    get obstacles() { return obstacles; }, get coins() { return coins; },
+    getWorldState, classifyFront, distBucket, obstacleDx, buildPrompt, parsePrediction,
+    predictExpert, decide, controlStep, update, start, gameOver,
+    scoreResult, actualOutcome, mockLLM, spawnObstacle, spawnCoin, hit, coinHit, applyAction,
+    DUCK_H, GROUND, GROUND_Y, DINO_H, LOW_COIN_Y, llmMode, llmKeyPresent,
+    setReal: v => { useRealLLM = v; },
+    // comparison mode
+    CMP, cmp, mulberry32, genCourse, makeRunner, cmpStep, cmpDecide, cmpProgress, cmpStart, setMode, cmpFrame, frontOf,
+  };
+}
+
+loop();
+</script>
+</body>
+</html>
